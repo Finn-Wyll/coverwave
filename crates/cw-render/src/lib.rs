@@ -9,7 +9,9 @@
 //! M5.
 
 pub mod art;
-pub use art::{ArtParams, DEFAULT_CELL_ASPECT, base_art, fit_cells};
+pub mod scene;
+pub use art::{ArtParams, DEFAULT_CELL_ASPECT, RAMP, Rect, art_rect, base_art, fit_cells};
+pub use scene::{Input, Output, Scene, limit_changes, prepare, render};
 
 use cw_core::{Cell, CellGrid, Rgb};
 use std::f32::consts::TAU;

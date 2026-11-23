@@ -137,7 +137,7 @@ Analysis budget: under 300ms per new cover on an M-series Mac, and under 5ms on 
   - dna[2] → particle density
   - dna[3] → flicker rate
   - dna[4] → sway amplitude
-  - dna[5] → charset: `sparse` (` .:`), `standard` (` .:-=+*#%@`), `dense` (a 66-step ASCII ramp). *Changed in M4:* `blocks` (` ░▒▓█`) was dropped to keep the art plain ASCII.
+  - dna[5] → charset: `sparse` (` .:`), `standard` (` .:-=+*#%@`), `dense` (` .`,:;~-=+*!?#%&$@`, 18 symbols; an earlier 66-step ramp with letters read as text soup). *Changed in M4:* `blocks` (` ░▒▓█`) was dropped to keep the art plain ASCII.
   - dna[6], dna[7] → reserved, kept in the JSON for future tuning
 - **Visual features adjust the result:**
   - `energy = 0.5*saturation + 0.5*edge_density`. Energy scales speed and density.
@@ -177,6 +177,7 @@ Users can override a recipe by dropping an edited copy in `~/.config/coverwave/o
 - **Seamless loops:** all motion is a function of `phase = (frame mod L) / L`, with `L = loop_frames`. Speeds are integer `cycles` per loop, sway is `sin(2π·cycles·phase + seed_phase)`, and particles wrap on a torus whose period divides `L`. Frame `L` is identical to frame `0`, which a test checks.
 - **Audio never touches timing.** Audio bands only scale *amplitude* (intensity, density, brightness, pulse) and never phase or speed. The loop stays seamless and the beat is still visible.
 - **Change budget:** at most about 15% of cells may change per frame. That rises linearly to 30% when `energy > 0.7`. If a frame goes over budget, the lowest-intensity layer's changes are dropped first. The diff is computed against the previous frame anyway for terminal output.
+  *As built in M5:* layers are designed to stay within budget on their own under steady audio (a test checks every frame of the loop for 12 random recipes, at silence and at full level). Changes that are only colour are quantised (fog levels, heat palette steps, flicker on/off), so only boundaries move. `limit_changes(scene, prev, next)` is the safety net for sudden audio jumps. It is a pure function of the previous output, and each cell carries the id of the layer that drew it, so the weakest layer is reverted first. `render` itself never sees history, which keeps `render(L) == render(0)` exact.
 
 ---
 
@@ -207,6 +208,8 @@ Per frame:
 Performance target: under 4ms per frame at 240x70 cells in release builds.
 
 `cw-render` is pure: `render(recipe, base, mask, audio_frame, frame_idx) -> CellGrid`. That makes golden tests and mobile ports simple.
+
+*As built in M5:* this is split in two. `prepare(recipe, base_art, art_rect, ramp) -> Scene` runs once per cover, size, style or recipe change: it resamples the mask and makes every seeded random choice (ChaCha8 per layer). `render(&Scene, Input { frame, audio, fade }) -> Output { grid, owner }` runs per frame. Draw order is displacement (ripple, row_sway, heat_shimmer resample the base) → fields (fog, heat_cycle, cloud_drift, flicker, neon_flicker, ambient) → particles (snow, rain, embers, dust, fireflies). Weaker layers draw first, so stronger ones win. Particles move on a torus with integer wraps per loop, and may cross the cover's margins; displacement and most fields stay inside the cover. Audio gains: bass scales intensity (0.7–1.3×), mid scales particle density (0.6–1.4×), treble scales flicker depth, and onset pulses particles and neon toward the accent. Silence still moves, gently. The frontend fades a new recipe in over 30 frames and `m` turns motion off. Measured: 0.5ms per frame at 240x70 with 4 heavy layers, 0.8ms with the limiter (`cargo bench -p cw-render --bench render`).
 
 ---
 
@@ -281,6 +284,8 @@ trait SystemCapture { fn start(&mut self, sink: Producer<f32>) -> Result<()>; fn
 | `S` | switch source (Local / Spotify / Apple Music) |
 | `R` | reload recipe (picks up override edits) |
 | `D` | debug overlay, cycling: stats (fps, cells changed, cover, live audio) → recipe (source, scenes, layers, globals, DNA) → off |
+| `m` | motion on/off (static art) |
+| `c` | cover colour style: palette, truecolor, duotone |
 | `q` | quit |
 
 **States to handle:** empty library (first-run screen asking for a music folder), missing cover (generated pattern from the palette of the artist name hash), analysis in progress (show static ASCII art immediately, fade motion in when the recipe arrives), capture permission denied (inline message plus how to fix it), Spotify not authenticated, a tiny terminal (below 40x12, show text only).
@@ -320,7 +325,7 @@ Each milestone ends with something runnable.
 | M2 | Static ASCII art | Embedded/folder art rendered with aspect correction, palette (k-means), truecolor + 256 fallback. **Done.** `cw-analysis` (decode, seed, palette) started early for this. Art lookup lives in `cw-audio::cover_art` until `cw-sources` exists. |
 | M3 | Audio analysis | Live bands + onsets shown in the `D` overlay and visibly tracking the music. **Done.** |
 | M4 | Analysis pipeline | MobileCLIP + PCA + features + mask + seed produce a cached recipe JSON; `tools/pca-fit` produces `pca.bin`. **Done.** The shipped `pca.bin` is provisional (see risks). |
-| M5 | Renderer + layers | All 8 scene layers, constraints (subject protection, seamless loop, change budget), audio modulation |
+| M5 | Renderer + layers | All 8 scene layers, constraints (subject protection, seamless loop, change budget), audio modulation. **Done** (all 14 layer kinds). |
 | M6 | Library, search, queue, playlists, lyrics | SQLite index, fuzzy search, m3u8 playlists, .lrc/embedded lyrics synced |
 | M7 | System capture + Spotify + Apple Music | macOS tap/SCK capture, Spotify PKCE control, Music.app control, source switching |
 | M8 | Windows | WASAPI loopback, path/config differences, CI build on Windows |

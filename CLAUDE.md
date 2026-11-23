@@ -3,11 +3,12 @@
 Terminal music player in Rust. It renders the album cover as ASCII, and each cover gets its own audio-reactive motion. The full design, crate layout and milestones are in [PLAN.md](PLAN.md). Read it before making architectural changes, and update it when a decision changes.
 
 ## Status
-M0 (workspace + TUI shell), M1 (local playback), M2 (static ASCII album art), M3 (audio analysis) and M4 (cover analysis -> recipe JSON) done. Next up: M5 (renderer + effect layers driven by the recipe). The shipped `assets/pca.bin` is provisional (87 covers); see PLAN.md section 15. Track progress against the milestone table in PLAN.md section 13. Crates are only added when their milestone starts. The workspace currently holds `cw-core` (shared types, colour maths, play queue, `Recipe`), `cw-analysis` (cover decode, seed, palette, MobileCLIP via tract, features, subject mask, PCA, recipe mapping), `cw-render` (idle scene + static base art), `cw-audio` (decode/resample/playback, cover-art lookup, FFT/onset analyser), `cw-tui` (also downloads the model and caches recipes) and `tools/pca-fit`.
+M0 (workspace + TUI shell), M1 (local playback), M2 (static ASCII album art), M3 (audio analysis), M4 (cover analysis -> recipe JSON) and M5 (recipe-driven renderer, all layer kinds) done. Next up: M6 (library, search, queue, playlists, lyrics). Hands-on checks waiting for the owner are listed in LOCAL_TODO.md. The shipped `assets/pca.bin` is provisional (87 covers); see PLAN.md section 15. Track progress against the milestone table in PLAN.md section 13. Crates are only added when their milestone starts. The workspace currently holds `cw-core` (shared types, colour maths, play queue, `Recipe`), `cw-analysis` (cover decode, seed, palette, MobileCLIP via tract, features, subject mask, PCA, recipe mapping), `cw-render` (idle scene, static base art, `prepare`/`render`/`limit_changes` for recipe motion), `cw-audio` (decode/resample/playback, cover-art lookup, FFT/onset analyser), `cw-tui` (also downloads the model and caches recipes) and `tools/pca-fit`.
 
 ## Commands
 - Run: `cargo run -p cw-tui --release -- <files or folders>` (`?` shows keys in the app)
 - Check: `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
+- Renderer perf: `cargo bench -p cw-render --bench render` (must stay under 4ms per frame at 240x70)
 - Decode check without playing: `cargo run -p cw-audio --release --example probe -- <files or folders>`
 - Analysis trace without playing: `cargo run -p cw-audio --release --example analyse -- <file>` (bands, level and onsets at 30fps as text)
 - Recipe for one image: `cargo run -p cw-analysis --release --example recipe -- <vision_model.onnx> <image> [assets/pca.bin]`

@@ -1,4 +1,4 @@
-use crate::app::{App, ArtCache, ColorMode, DebugPage, Mode};
+use crate::app::{App, ArtCache, ColorMode, DebugPage, FADE_FRAMES, Mode};
 use crate::cover::Slot;
 use cw_audio::{Status, Track};
 use cw_core::{CellGrid, Repeat, Rgb, ansi256};
@@ -104,39 +104,70 @@ fn draw_too_small(f: &mut Frame, area: Rect) {
 
 fn draw_art(f: &mut Frame, app: &mut App, area: Rect) {
     let grid = match app.shown_cover.clone() {
-        Some(cover) => {
+        Some(entry) => {
             let fresh = app.art_cache.as_ref().is_some_and(|c| {
-                c.seed == cover.seed
+                c.entry == entry.id
                     && (c.width, c.height) == (area.width, area.height)
                     && c.style == app.art_style
                     && c.cell_aspect == app.cell_aspect
             });
             if !fresh {
-                // Only on cover, size, style or aspect changes: never per frame.
+                // Only on cover, recipe, size, style or aspect changes.
+                let recipe = &entry.recipe.recipe;
+                let ramp = recipe.global.charset.ramp();
                 let params = ArtParams {
                     cell_aspect: app.cell_aspect,
                     style: app.art_style,
                     background: BG_RGB,
+                    ramp,
                 };
+                let (w, h) = (area.width, area.height);
+                let base = cw_render::base_art(&entry.image, &entry.palette, w, h, params);
+                let art = cw_render::art_rect(
+                    entry.image.width,
+                    entry.image.height,
+                    w,
+                    h,
+                    app.cell_aspect,
+                )
+                .unwrap_or_default();
+                let scene = cw_render::prepare(recipe, base.clone(), art, ramp);
+                if app.fade_entry != entry.id {
+                    app.fade_entry = entry.id;
+                    app.fade_start = app.frame;
+                }
+                app.prev_out = None;
                 app.art_cache = Some(ArtCache {
-                    seed: cover.seed,
-                    width: area.width,
-                    height: area.height,
+                    entry: entry.id,
+                    width: w,
+                    height: h,
                     style: app.art_style,
                     cell_aspect: app.cell_aspect,
-                    grid: cw_render::base_art(
-                        &cover.image,
-                        &cover.palette,
-                        area.width,
-                        area.height,
-                        params,
-                    ),
+                    base,
+                    scene,
                 });
             }
-            app.art_cache
-                .as_ref()
-                .map(|c| c.grid.clone())
-                .unwrap_or_else(|| CellGrid::new(0, 0))
+            match app.art_cache.as_ref() {
+                None => CellGrid::new(0, 0),
+                Some(c) if !app.motion => c.base.clone(),
+                Some(c) => {
+                    let age = app.frame.wrapping_sub(app.fade_start);
+                    let fade = (age as f32 / FADE_FRAMES as f32).min(1.0);
+                    let input = cw_render::Input {
+                        frame: app.frame,
+                        audio: &app.audio,
+                        fade,
+                    };
+                    let out = cw_render::render(&c.scene, input);
+                    let out = match app.prev_out.take() {
+                        Some(prev) => cw_render::limit_changes(&c.scene, &prev, out),
+                        None => out,
+                    };
+                    let grid = out.grid.clone();
+                    app.prev_out = Some(out);
+                    grid
+                }
+            }
         }
         None => cw_render::idle(
             area.width,
@@ -533,7 +564,11 @@ fn draw_recipe(f: &mut Frame, app: &App, main: Rect) {
     };
     let loaded = &entry.recipe;
     let r = &loaded.recipe;
-    lines.push(Line::from(format!("source  {}", loaded.source.name())));
+    lines.push(Line::from(format!(
+        "source  {}{}",
+        loaded.source.name(),
+        if app.motion { "" } else { ", motion off" }
+    )));
     if let Some(w) = &loaded.warning {
         lines.push(Line::from(Span::styled(
             fit(w, OVERLAY_TEXT_W),
@@ -637,6 +672,7 @@ const KEYS: &[(&str, &str)] = &[
     ("r", "repeat: off, all, one"),
     ("tab", "art / library"),
     ("c", "cover style (palette, true, duo)"),
+    ("m", "motion on / off"),
     ("up  down", "move in library (or j k)"),
     ("enter", "play selected"),
     ("D", "debug overlay: stats, recipe, off"),

@@ -18,9 +18,13 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 /// A cover and its recipe.
 #[derive(Debug)]
 pub struct CoverEntry {
+    /// Unique per load, so caches can tell a reloaded recipe apart.
+    pub id: u64,
     pub cover: Cover,
     pub recipe: Loaded,
 }
+
+static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Deref for CoverEntry {
     type Target = Cover;
@@ -92,7 +96,8 @@ impl CoverLoader {
                         let recipe =
                             ctx.store
                                 .load(&cover, clip.as_deref(), &ctx.scenes, ctx.pca.as_ref());
-                        CoverEntry { cover, recipe }
+                        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        CoverEntry { id, cover, recipe }
                     });
                 // The receiver only disappears when the app is quitting.
                 let _ = tx.send((index, result));

@@ -91,7 +91,7 @@ pub enum Charset {
     Sparse,
     /// ` .:-=+*#%@`
     Standard,
-    /// A long ramp for fine tonal detail.
+    /// An 18-step symbol ramp for finer tonal detail.
     Dense,
 }
 
@@ -100,12 +100,10 @@ impl Charset {
         match self {
             Charset::Sparse => &[' ', '.', ':'],
             Charset::Standard => &[' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'],
+            // Symbols only: letters in a ramp read as text, not tone.
             Charset::Dense => &[
-                ' ', '.', '\'', '`', '^', ',', ':', ';', 'I', 'l', '!', 'i', '~', '+', '_', '-',
-                '?', ']', '[', '}', '{', '1', ')', '(', '|', '/', 't', 'f', 'j', 'r', 'x', 'n',
-                'u', 'v', 'c', 'z', 'X', 'Y', 'U', 'J', 'C', 'L', 'Q', '0', 'O', 'Z', 'm', 'w',
-                'q', 'p', 'd', 'b', 'k', 'h', 'a', 'o', '*', '#', 'M', 'W', '&', '8', '%', 'B',
-                '@', '$',
+                ' ', '.', '`', ',', ':', ';', '~', '-', '=', '+', '*', '!', '?', '#', '%', '&',
+                '$', '@',
             ],
         }
     }

@@ -28,6 +28,9 @@ pub struct ArtParams {
     pub style: ArtStyle,
     /// Background for every cell, inside and outside the cover.
     pub background: Rgb,
+    /// Density ramp, sparse to dense, starting with a space ([`RAMP`] or a
+    /// recipe's charset).
+    pub ramp: &'static [char],
 }
 
 /// Size in cells of the largest cover that fits in `cols x rows` while
@@ -46,6 +49,33 @@ pub fn fit_cells(img_w: u32, img_h: u32, cols: u16, rows: u16, cell_aspect: f32)
         (cols as f64, (cols as f64 / ratio).round())
     };
     ((c as u16).clamp(1, cols), (r as u16).clamp(1, rows))
+}
+
+/// A rectangle of cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Rect {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+}
+
+impl Rect {
+    pub fn contains(&self, x: u16, y: u16) -> bool {
+        x >= self.x && y >= self.y && x < self.x + self.w && y < self.y + self.h
+    }
+}
+
+/// Where [`base_art`] puts the cover inside a `cols x rows` grid, or `None`
+/// for an empty area.
+pub fn art_rect(img_w: u32, img_h: u32, cols: u16, rows: u16, cell_aspect: f32) -> Option<Rect> {
+    let (w, h) = fit_cells(img_w, img_h, cols, rows, cell_aspect);
+    (w > 0 && h > 0).then(|| Rect {
+        x: (cols - w) / 2,
+        y: (rows - h) / 2,
+        w,
+        h,
+    })
 }
 
 /// Renders `image` as ASCII art centred in a `cols x rows` grid.
@@ -71,11 +101,16 @@ pub fn base_art(
             );
         }
     }
-    let (w, h) = fit_cells(image.width, image.height, cols, rows, params.cell_aspect);
-    if w == 0 || h == 0 {
+    let Some(Rect { x: ox, y: oy, w, h }) =
+        art_rect(image.width, image.height, cols, rows, params.cell_aspect)
+    else {
         return grid;
-    }
-    let (ox, oy) = ((cols - w) / 2, (rows - h) / 2);
+    };
+    let ramp = if params.ramp.len() >= 2 {
+        params.ramp
+    } else {
+        RAMP
+    };
 
     let cells = image.resize_area(w as u32, h as u32);
     let labs: Vec<Lab> = cells.pixels.iter().map(|&c| Lab::from(c)).collect();
@@ -86,8 +121,8 @@ pub fn base_art(
 
     for (i, lab) in labs.iter().enumerate() {
         let t = ((lab.l - lo) / (hi - lo)).clamp(0.0, 1.0);
-        let idx = (t * (RAMP.len() - 1) as f32).round() as usize;
-        let ch = RAMP[idx];
+        let idx = (t * (ramp.len() - 1) as f32).round() as usize;
+        let ch = ramp[idx];
         let fg = match params.style {
             ArtStyle::TrueColor => lift(*lab),
             ArtStyle::PaletteLed => {
@@ -169,6 +204,7 @@ mod tests {
             cell_aspect: 0.5,
             style,
             background: BG,
+            ramp: RAMP,
         }
     }
 

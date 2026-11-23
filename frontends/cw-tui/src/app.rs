@@ -80,16 +80,21 @@ impl Default for Settings {
     }
 }
 
-/// The ASCII art for one cover at one size and style, kept until any of
-/// those change.
+/// The prepared scene for one cover entry at one size and style, kept until
+/// any of those change.
 pub struct ArtCache {
-    pub seed: u64,
+    pub entry: u64,
     pub width: u16,
     pub height: u16,
     pub style: ArtStyle,
     pub cell_aspect: f32,
-    pub grid: CellGrid,
+    /// The static art (shown with motion off).
+    pub base: CellGrid,
+    pub scene: cw_render::Scene,
 }
+
+/// Frames over which a new recipe's motion fades in (1s at 30fps).
+pub const FADE_FRAMES: u32 = 30;
 
 /// What the `D` overlay shows; `D` cycles through them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +155,13 @@ pub struct App {
     /// Whether the model was ready last frame, to notice it becoming ready.
     model_was_ready: bool,
     pub art_cache: Option<ArtCache>,
+    /// The last rendered frame, for the change limiter.
+    pub prev_out: Option<cw_render::Output>,
+    /// Motion on (`m` toggles).
+    pub motion: bool,
+    /// The cover entry whose motion is fading in, and the frame it started.
+    pub fade_entry: u64,
+    pub fade_start: u32,
     frame_times: VecDeque<Instant>,
 }
 
@@ -192,6 +204,10 @@ impl App {
             shown_cover: None,
             model_was_ready: false,
             art_cache: None,
+            prev_out: None,
+            motion: true,
+            fade_entry: 0,
+            fade_start: 0,
             frame_times: VecDeque::with_capacity(64),
         }
     }
@@ -288,6 +304,7 @@ impl App {
             KeyCode::Char('R') => self.reload_recipe(),
             KeyCode::Char('?') => self.show_help = !self.show_help,
             KeyCode::Char('c') => self.art_style = self.art_style.next(),
+            KeyCode::Char('m') => self.motion = !self.motion,
             _ => self.on_playback_key(key.code, shift),
         }
     }
@@ -394,6 +411,8 @@ mod tests {
         app.on_key(press(KeyCode::Char('D')));
         assert_eq!(app.debug_page, DebugPage::Recipe);
         app.on_key(press(KeyCode::Char('R'))); // nothing shown: no-op
+        app.on_key(press(KeyCode::Char('m')));
+        assert!(!app.motion);
         app.on_key(press(KeyCode::Char('c')));
         assert_eq!(app.art_style, ArtStyle::TrueColor);
         // Playback keys without a player are ignored, not a crash.
