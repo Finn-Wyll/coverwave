@@ -48,12 +48,45 @@ pub struct Snapshot {
     pub last_error: Option<String>,
 }
 
+impl Snapshot {
+    fn empty(status: Status, volume: u8) -> Snapshot {
+        Snapshot {
+            status,
+            track: None,
+            position_secs: 0.0,
+            duration_secs: None,
+            volume,
+            shuffle: false,
+            repeat: Repeat::Off,
+            order: Vec::new(),
+            last_error: None,
+        }
+    }
+}
+
 #[derive(Debug)]
 enum Command {
+    /// A new track list and queue, starting at `start` from `secs`.
+    Replace {
+        tracks: Vec<Track>,
+        start: usize,
+        secs: f64,
+        generation: u64,
+    },
+    /// One more track at the end of the list and the queue.
+    Append(Track),
     JumpTo(usize),
-    Next { from: usize },
-    Prev { from: usize, position: f64 },
-    Seek { track: usize, secs: f64 },
+    Next {
+        from: usize,
+    },
+    Prev {
+        from: usize,
+        position: f64,
+    },
+    Seek {
+        track: usize,
+        secs: f64,
+    },
     SetShuffle(bool),
     SetRepeat(Repeat),
 }
@@ -76,6 +109,8 @@ struct DecoderState {
     shuffle: bool,
     repeat: Repeat,
     last_error: Option<String>,
+    /// Bumped by every `Replace`; snapshots from an older list are ignored.
+    generation: u64,
 }
 
 struct Shared {
@@ -91,7 +126,10 @@ struct Shared {
 }
 
 pub struct Player {
-    tracks: Arc<Vec<Track>>,
+    /// The UI's copy of the decoder's track list, kept in step by sending
+    /// every change as a command.
+    tracks: Vec<Track>,
+    generation: u64,
     shared: Arc<Shared>,
     commands: Sender<Command>,
     volume: u8,
@@ -152,7 +190,6 @@ impl Player {
             .play()
             .map_err(|e| AudioError::Device(e.to_string()))?;
 
-        let tracks = Arc::new(tracks);
         let (tx, rx) = mpsc::channel();
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -160,6 +197,7 @@ impl Player {
             .unwrap_or(0x5EED);
         let queue = Queue::new(tracks.len(), start, false, seed);
         let mut decoder = Decoder::new(tracks.clone(), shared.clone(), producer, rx, queue);
+        decoder.seed = seed;
         thread::Builder::new()
             .name("cw-decoder".into())
             .spawn(move || decoder.run())
@@ -174,6 +212,7 @@ impl Player {
 
         Ok(Player {
             tracks,
+            generation: 0,
             shared,
             commands: tx,
             volume,
@@ -189,6 +228,10 @@ impl Player {
     pub fn snapshot(&self) -> Snapshot {
         let consumed = self.shared.consumed.load(Ordering::Acquire);
         let mut st = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.generation != self.generation {
+            // The decoder has not picked up the new list yet.
+            return Snapshot::empty(Status::Stopped, self.volume);
+        }
         // Drop boundaries that have been fully passed.
         while st.boundaries.len() > 1 && st.boundaries[1].start_frame <= consumed {
             st.boundaries.pop_front();
@@ -232,6 +275,30 @@ impl Player {
     /// paused or stopped).
     pub fn audio_frame(&self) -> AudioFrame {
         *self.analysis.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Replaces the whole list and queue, starting at `start` from `secs`
+    /// (e.g. playing an album, or restoring a saved queue).
+    pub fn replace(&mut self, tracks: Vec<Track>, start: usize, secs: f64) {
+        self.generation += 1;
+        self.tracks = tracks.clone();
+        self.shared.paused.store(false, Ordering::Relaxed);
+        self.send(Command::Replace {
+            tracks,
+            start,
+            secs,
+            generation: self.generation,
+        });
+    }
+
+    /// Adds a track to the end of the queue. Starts playing if nothing was.
+    pub fn append(&mut self, track: Track) {
+        self.tracks.push(track.clone());
+        self.send(Command::Append(track));
+    }
+
+    pub fn set_paused(&mut self, paused: bool) {
+        self.shared.paused.store(paused, Ordering::Relaxed);
     }
 
     pub fn toggle_pause(&mut self) {
@@ -297,6 +364,14 @@ impl Player {
         self.volume
     }
 
+    pub fn set_shuffle(&mut self, on: bool) {
+        self.send(Command::SetShuffle(on));
+    }
+
+    pub fn set_repeat(&mut self, repeat: Repeat) {
+        self.send(Command::SetRepeat(repeat));
+    }
+
     pub fn toggle_shuffle(&mut self) {
         let on = !self.snapshot().shuffle;
         self.send(Command::SetShuffle(on));
@@ -336,14 +411,20 @@ where
     // Real-time callback: no allocation, no blocking locks.
     let data_fn = move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
         if shared.flush.load(Ordering::Acquire) {
+            // The decoder pushes nothing while a flush is pending, so this
+            // count is only old audio. Claim the request before draining:
+            // if the decoder already gave up waiting and cancelled it, the
+            // ring may hold new audio, which must not be thrown away. The
+            // decoder owns the consumed counter across a flush.
             let n = consumer.slots();
-            if let Ok(chunk) = consumer.read_chunk(n) {
+            if shared
+                .flush
+                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+                && let Ok(chunk) = consumer.read_chunk(n)
+            {
                 chunk.commit_all();
             }
-            shared
-                .consumed
-                .fetch_add((n / OUT_CHANNELS) as u64, Ordering::AcqRel);
-            shared.flush.store(false, Ordering::Release);
         }
 
         let frames = data.len() / channels.max(1);
@@ -430,7 +511,9 @@ fn run_analyser(mut tap: Consumer<f32>, rate: u32, out: Arc<Mutex<AudioFrame>>) 
 
 /// Owns the queue and the open file; decodes ahead into the ring buffer.
 struct Decoder {
-    tracks: Arc<Vec<Track>>,
+    tracks: Vec<Track>,
+    /// Seed for new queues' shuffle.
+    seed: u64,
     shared: Arc<Shared>,
     producer: Producer<f32>,
     commands: Receiver<Command>,
@@ -444,7 +527,7 @@ struct Decoder {
 
 impl Decoder {
     fn new(
-        tracks: Arc<Vec<Track>>,
+        tracks: Vec<Track>,
         shared: Arc<Shared>,
         producer: Producer<f32>,
         commands: Receiver<Command>,
@@ -452,6 +535,7 @@ impl Decoder {
     ) -> Self {
         Decoder {
             tracks,
+            seed: 1,
             shared,
             producer,
             commands,
@@ -492,6 +576,67 @@ impl Decoder {
     }
 
     fn handle(&mut self, cmd: Command) {
+        let cmd = match cmd {
+            Command::Replace {
+                tracks,
+                start,
+                secs,
+                generation,
+            } => {
+                let (shuffle, repeat) = self
+                    .queue
+                    .as_ref()
+                    .map_or((false, Repeat::Off), |q| (q.shuffle(), q.repeat()));
+                self.flush();
+                self.reader = None;
+                self.tracks = tracks;
+                self.queue = Queue::new(self.tracks.len(), start, false, self.seed);
+                if let Some(q) = self.queue.as_mut() {
+                    q.set_repeat(repeat);
+                    q.set_shuffle(shuffle);
+                }
+                self.lock_state().generation = generation;
+                match self.queue.as_ref().map(Queue::current) {
+                    Some(t) => self.load(t, secs),
+                    None => self.stop(),
+                }
+                self.publish_queue();
+                return;
+            }
+            Command::Append(track) => {
+                self.tracks.push(track);
+                match self.queue.as_mut() {
+                    Some(q) => {
+                        q.push();
+                        if self.reader.is_none() && self.pending.is_empty() {
+                            let heard_end = {
+                                let consumed = self.shared.consumed.load(Ordering::Acquire);
+                                self.lock_state().ended_at.is_some_and(|e| consumed >= e)
+                            };
+                            if heard_end {
+                                // Playback had stopped: start the new track.
+                                let t = self.tracks.len() - 1;
+                                if let Some(q) = self.queue.as_mut() {
+                                    q.jump_to(t);
+                                }
+                                self.load(t, 0.0);
+                            } else {
+                                // The last track is still sounding: follow it
+                                // gaplessly.
+                                self.advance();
+                            }
+                        }
+                    }
+                    None => {
+                        self.queue = Queue::new(1, 0, false, self.seed);
+                        self.load(0, 0.0);
+                    }
+                }
+                self.publish_queue();
+                return;
+            }
+            other => other,
+        };
         let Some(queue) = self.queue.as_mut() else {
             return;
         };
@@ -522,6 +667,7 @@ impl Decoder {
             }
             Command::SetShuffle(on) => queue.set_shuffle(on),
             Command::SetRepeat(r) => queue.set_repeat(r),
+            Command::Replace { .. } | Command::Append(_) => unreachable!("handled above"),
         }
         self.publish_queue();
     }
@@ -550,6 +696,9 @@ impl Decoder {
         while self.shared.flush.load(Ordering::Acquire) && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(1));
         }
+        // The callback never ran (device starting up or stalled): cancel the
+        // request so it cannot later drain audio pushed after this point.
+        self.shared.flush.store(false, Ordering::Release);
         // If the device stalled, the callback never drained; either way
         // nothing old will be counted as the new track's position.
         self.shared.consumed.store(self.pushed, Ordering::Release);

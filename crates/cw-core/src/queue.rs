@@ -97,6 +97,15 @@ impl Queue {
         }
     }
 
+    /// Adds the next track index (`len()`, a track just appended to the
+    /// list) to the end of the play order, and returns it. With shuffle on
+    /// it still plays last: "add to queue" means "play later".
+    pub fn push(&mut self) -> usize {
+        let t = self.order.len();
+        self.order.push(t);
+        t
+    }
+
     /// Selects a specific track (e.g. chosen in the library view).
     pub fn jump_to(&mut self, track: usize) {
         if let Some(p) = self.order.iter().position(|&t| t == track) {
@@ -264,5 +273,16 @@ mod tests {
         let mut q = Queue::new(5, 0, true, 3).unwrap();
         q.jump_to(4);
         assert_eq!(q.current(), 4);
+    }
+
+    #[test]
+    fn push_appends_to_the_end_even_when_shuffled() {
+        let mut q = Queue::new(3, 1, true, 9).unwrap();
+        assert_eq!(q.push(), 3);
+        assert_eq!(*q.order().0.last().unwrap(), 3);
+        assert_eq!(q.len(), 4);
+        // Unshuffling keeps the new track, in list order.
+        q.set_shuffle(false);
+        assert_eq!(q.order().0, &[0, 1, 2, 3]);
     }
 }

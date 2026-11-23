@@ -1,9 +1,13 @@
+use crate::browse::{Action, Browser};
 use crate::cover::{CoverEntry, CoverLoader, RecipeContext, Slot};
 use cw_audio::{Player, Snapshot};
-use cw_core::{ArtStyle, AudioFrame, CellGrid};
+use cw_core::{ArtStyle, AudioFrame, CellGrid, Repeat};
+use cw_library::{Library, Lyrics, ScanStats};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +71,9 @@ pub struct Settings {
     pub cell_aspect: Option<f32>,
     /// Never download the analysis model.
     pub offline: bool,
+    /// Start with cover motion on.
+    pub motion: bool,
+    pub fps: u32,
 }
 
 impl Default for Settings {
@@ -76,6 +83,8 @@ impl Default for Settings {
             color_mode: ColorMode::TrueColor,
             cell_aspect: None,
             offline: false,
+            motion: true,
+            fps: 30,
         }
     }
 }
@@ -116,6 +125,20 @@ impl DebugPage {
     }
 }
 
+/// Where the app keeps its files. `None` disables that feature.
+#[derive(Debug, Clone, Default)]
+pub struct Dirs {
+    pub playlists: Option<PathBuf>,
+    pub queue_file: Option<PathBuf>,
+}
+
+/// A track counts as played once this fraction of it has been heard (or
+/// four minutes, for long tracks).
+const PLAYED_FRACTION: f64 = 0.5;
+const PLAYED_SECS: f64 = 240.0;
+/// Frames a status message stays up.
+const STATUS_FRAMES: u32 = 120;
+
 pub struct App {
     pub mode: Mode,
     pub fps: u32,
@@ -137,10 +160,24 @@ pub struct App {
     pub snapshot: Option<Snapshot>,
     /// Music analysis, read once per frame alongside the snapshot.
     pub audio: AudioFrame,
-    /// Highlighted row in the library list.
-    pub library_cursor: usize,
-    /// First visible row of the library list.
-    pub library_offset: usize,
+    /// The UI's connection to the library (a scan thread has its own).
+    pub library: Option<Library>,
+    pub browser: Browser,
+    /// Finished background scans.
+    pub scan_rx: Option<Receiver<Result<ScanStats, String>>>,
+    pub scan_status: String,
+    pub dirs: Dirs,
+    /// Playlist-name input, when `P` is waiting for one.
+    pub prompt: Option<String>,
+    /// A short message under the HUD (saved playlist, config problems).
+    pub status: Option<(String, u32)>,
+    pub show_lyrics: bool,
+    /// Seconds added to the playback position when timing lyrics.
+    pub lyrics_offset: f64,
+    /// Lyrics of the track being heard, loaded when it starts.
+    pub lyrics: Option<(PathBuf, Option<Lyrics>)>,
+    /// The track being heard and the furthest point reached, for play counts.
+    heard: Option<(PathBuf, f64, Option<f64>)>,
     pub art_style: ArtStyle,
     pub color_mode: ColorMode,
     /// Cell width / height used to keep covers in proportion.
@@ -191,8 +228,17 @@ impl App {
             audio_error,
             snapshot: None,
             audio: AudioFrame::default(),
-            library_cursor: 0,
-            library_offset: 0,
+            library: None,
+            browser: Browser::new(None, None),
+            scan_rx: None,
+            scan_status: String::new(),
+            dirs: Dirs::default(),
+            prompt: None,
+            status: None,
+            show_lyrics: true,
+            lyrics_offset: 0.0,
+            lyrics: None,
+            heard: None,
             art_style: settings.art_style,
             color_mode: settings.color_mode,
             cell_aspect: settings
@@ -205,15 +251,11 @@ impl App {
             model_was_ready: false,
             art_cache: None,
             prev_out: None,
-            motion: true,
+            motion: settings.motion,
             fade_entry: 0,
             fade_start: 0,
             frame_times: VecDeque::with_capacity(64),
         }
-    }
-
-    pub fn track_count(&self) -> usize {
-        self.player.as_ref().map_or(0, |p| p.tracks().len())
     }
 
     /// Refreshes the playback snapshot; call once before drawing a frame.
@@ -231,6 +273,179 @@ impl App {
         }
         self.model_was_ready = ready;
         self.update_cover();
+        self.poll_scan();
+        self.track_listening();
+    }
+
+    /// Attaches the library, its file locations and a running scan.
+    pub fn attach_library(
+        &mut self,
+        library: Option<Library>,
+        dirs: Dirs,
+        scan_rx: Option<Receiver<Result<ScanStats, String>>>,
+    ) {
+        self.browser = Browser::new(library.as_ref(), dirs.playlists.clone());
+        self.library = library;
+        self.dirs = dirs;
+        if scan_rx.is_some() {
+            self.scan_status = "scanning".into();
+        }
+        self.scan_rx = scan_rx;
+    }
+
+    fn poll_scan(&mut self) {
+        let Some(rx) = &self.scan_rx else { return };
+        let Ok(result) = rx.try_recv() else { return };
+        self.scan_rx = None;
+        self.scan_status = match result {
+            Ok(s) => {
+                let changed = s.added + s.updated + s.removed;
+                if changed > 0 {
+                    self.browser.refresh(self.library.as_ref());
+                }
+                format!("{} tracks", s.total)
+            }
+            Err(e) => format!("scan failed: {e}"),
+        };
+    }
+
+    pub fn say(&mut self, msg: impl Into<String>) {
+        self.status = Some((msg.into(), self.frame));
+    }
+
+    /// The status message, while it is still fresh.
+    pub fn status_text(&self) -> Option<&str> {
+        self.status
+            .as_ref()
+            .filter(|(_, at)| self.frame.wrapping_sub(*at) < STATUS_FRAMES)
+            .map(|(m, _)| m.as_str())
+    }
+
+    /// Path of the track being heard.
+    pub fn current_path(&self) -> Option<PathBuf> {
+        let (snap, player) = (self.snapshot.as_ref()?, self.player.as_ref()?);
+        snap.track.map(|t| player.tracks()[t].path.clone())
+    }
+
+    /// Loads lyrics when the track changes, and counts plays.
+    fn track_listening(&mut self) {
+        let current = self.current_path();
+        let pos = self.snapshot.as_ref().map_or(0.0, |s| s.position_secs);
+        let dur = self.snapshot.as_ref().and_then(|s| s.duration_secs);
+        let same = matches!((&self.heard, &current), (Some((p, _, _)), Some(c)) if p == c);
+        if same {
+            if let Some(h) = self.heard.as_mut() {
+                h.1 = h.1.max(pos);
+            }
+        } else {
+            if let Some((path, furthest, duration)) = self.heard.take() {
+                let enough = duration.map_or(furthest >= PLAYED_SECS, |d| {
+                    furthest >= (d * PLAYED_FRACTION).min(PLAYED_SECS)
+                });
+                if enough && let Some(lib) = &self.library {
+                    let _ = lib.record_play(&path, cw_library::now_secs());
+                }
+            }
+            self.heard = current.clone().map(|p| (p, pos, dur));
+        }
+        let lyrics_stale = match (&self.lyrics, &current) {
+            (Some((p, _)), Some(c)) => p != c,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if lyrics_stale && let Some(c) = current {
+            let l = cw_library::lyrics::load(&c);
+            self.lyrics = Some((c, l));
+        }
+    }
+
+    /// Lyrics of the current track, if any.
+    pub fn current_lyrics(&self) -> Option<&Lyrics> {
+        let current = self.current_path()?;
+        match &self.lyrics {
+            Some((p, l)) if *p == current => l.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Saves the queue for the next start.
+    pub fn save_queue(&self) {
+        let (Some(path), Some(player), Some(snap)) =
+            (&self.dirs.queue_file, &self.player, &self.snapshot)
+        else {
+            return;
+        };
+        let tracks = player.tracks();
+        if tracks.is_empty() {
+            return;
+        }
+        let q = cw_library::state::SavedQueue {
+            paths: tracks.iter().map(|t| t.path.clone()).collect(),
+            current: snap.track.unwrap_or(0),
+            position_secs: snap.position_secs,
+            shuffle: snap.shuffle,
+            repeat: match snap.repeat {
+                Repeat::Off => "off",
+                Repeat::All => "all",
+                Repeat::One => "one",
+            }
+            .into(),
+            volume: snap.volume,
+        };
+        let _ = q.save(path);
+    }
+
+    fn apply(&mut self, action: Action) {
+        let Some(p) = self.player.as_mut() else {
+            if action != Action::None {
+                self.say("no audio device: cannot play");
+            }
+            return;
+        };
+        match action {
+            Action::None => {}
+            Action::Play { tracks, start } => p.replace(tracks, start, 0.0),
+            Action::Append(tracks) => {
+                let n = tracks.len();
+                for t in tracks {
+                    p.append(t);
+                }
+                self.say(format!(
+                    "added {n} track{} to the queue",
+                    if n == 1 { "" } else { "s" }
+                ));
+            }
+        }
+    }
+
+    fn save_playlist(&mut self, name: &str) {
+        let (Some(dir), Some(player)) = (self.dirs.playlists.clone(), self.player.as_ref()) else {
+            self.say("nothing to save");
+            return;
+        };
+        // Queue in play order.
+        let order = self
+            .snapshot
+            .as_ref()
+            .map(|s| s.order.clone())
+            .unwrap_or_default();
+        let tracks: Vec<cw_audio::Track> =
+            order.iter().map(|&i| player.tracks()[i].clone()).collect();
+        if tracks.is_empty() {
+            self.say("the queue is empty");
+            return;
+        }
+        match cw_library::playlist::save(&dir, name, &tracks) {
+            Ok(path) => {
+                let shown = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.say(format!("saved playlist {shown} ({} tracks)", tracks.len()));
+                self.browser.refresh(self.library.as_ref());
+            }
+            Err(e) => self.say(format!("cannot save playlist: {e}")),
+        }
     }
 
     /// Requests covers for the playing track and the one after it (so a
@@ -252,9 +467,9 @@ impl App {
             .and_then(|i| snap.order.get(i + 1))
             .copied();
         for t in std::iter::once(current).chain(next) {
-            self.covers.request(t, tracks[t].path.clone());
+            self.covers.request(&tracks[t].path);
         }
-        match self.covers.get(current) {
+        match self.covers.get(&tracks[current].path) {
             Some(Slot::Ready(c)) => self.shown_cover = Some(c.clone()),
             Some(Slot::Missing(_)) => self.shown_cover = None,
             Some(Slot::Loading) | None => {} // keep the previous cover a moment
@@ -292,13 +507,74 @@ impl App {
 
     pub fn on_key(&mut self, key: KeyEvent) {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && key.code == KeyCode::Char('c') {
+            self.should_quit = true;
+            return;
+        }
+        // Text input first: the playlist-name prompt, then search.
+        if let Some(text) = self.prompt.as_mut() {
+            match key.code {
+                KeyCode::Esc => self.prompt = None,
+                KeyCode::Enter => {
+                    let name = std::mem::take(text);
+                    self.prompt = None;
+                    if !name.trim().is_empty() {
+                        self.save_playlist(&name);
+                    }
+                }
+                KeyCode::Backspace => {
+                    text.pop();
+                }
+                KeyCode::Char(c) => text.push(c),
+                _ => {}
+            }
+            return;
+        }
+        if self.mode == Mode::Library && self.browser.in_search() {
+            let lib = self.library.as_ref();
+            match key.code {
+                KeyCode::Esc => {
+                    self.browser.back();
+                }
+                KeyCode::Backspace => {
+                    if !self.browser.delete_char(lib) {
+                        self.browser.back();
+                    }
+                }
+                KeyCode::Up => self.browser.move_by(-1),
+                KeyCode::Down => self.browser.move_by(1),
+                KeyCode::PageUp => self.browser.move_by(-10),
+                KeyCode::PageDown => self.browser.move_by(10),
+                KeyCode::Enter => {
+                    let a = self.browser.enter(lib);
+                    self.apply(a);
+                }
+                KeyCode::Tab => {
+                    let a = self.browser.add(lib);
+                    self.apply(a);
+                }
+                KeyCode::Char(c) => self.browser.type_char(c, lib),
+                _ => {}
+            }
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true
-            }
             KeyCode::Esc if self.show_help => self.show_help = false,
+            KeyCode::Esc if self.mode == Mode::Library && self.browser.levels.len() > 1 => {
+                self.browser.back();
+            }
             KeyCode::Esc => self.should_quit = true,
+            KeyCode::Char('/') => {
+                self.mode = Mode::Library;
+                self.browser
+                    .open(crate::browse::ViewKind::Search, self.library.as_ref());
+            }
+            KeyCode::Char('P') => self.prompt = Some(String::new()),
+            KeyCode::Char('l') => self.show_lyrics = !self.show_lyrics,
+            KeyCode::Char('[') => self.lyrics_offset -= 0.25,
+            KeyCode::Char(']') => self.lyrics_offset += 0.25,
             KeyCode::Tab => self.mode = self.mode.next(),
             KeyCode::Char('D') => self.debug_page = self.debug_page.next(),
             KeyCode::Char('R') => self.reload_recipe(),
@@ -310,25 +586,51 @@ impl App {
     }
 
     fn on_playback_key(&mut self, code: KeyCode, shift: bool) {
-        let count = self.track_count();
-        if self.mode == Mode::Library && count > 0 {
-            match code {
+        if self.mode == Mode::Library {
+            let lib = self.library.as_ref();
+            let handled = match code {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    self.library_cursor = self.library_cursor.saturating_sub(1);
-                    return;
+                    self.browser.move_by(-1);
+                    true
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    self.library_cursor = (self.library_cursor + 1).min(count - 1);
-                    return;
+                    self.browser.move_by(1);
+                    true
+                }
+                KeyCode::PageUp => {
+                    self.browser.move_by(-10);
+                    true
+                }
+                KeyCode::PageDown => {
+                    self.browser.move_by(10);
+                    true
+                }
+                KeyCode::Home => {
+                    self.browser.move_by(isize::MIN / 2);
+                    true
+                }
+                KeyCode::End => {
+                    self.browser.move_by(isize::MAX / 2);
+                    true
+                }
+                KeyCode::Backspace => {
+                    self.browser.back();
+                    true
                 }
                 KeyCode::Enter => {
-                    let cursor = self.library_cursor;
-                    if let Some(p) = self.player.as_mut() {
-                        p.jump_to(cursor);
-                    }
-                    return;
+                    let a = self.browser.enter(lib);
+                    self.apply(a);
+                    true
                 }
-                _ => {}
+                KeyCode::Char('a') => {
+                    let a = self.browser.add(lib);
+                    self.apply(a);
+                    true
+                }
+                _ => false,
+            };
+            if handled {
+                return;
             }
         }
         let Some(p) = self.player.as_mut() else {

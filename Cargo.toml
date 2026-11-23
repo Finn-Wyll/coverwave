@@ -4,6 +4,7 @@ members = [
     "crates/cw-analysis",
     "crates/cw-audio",
     "crates/cw-core",
+    "crates/cw-library",
     "crates/cw-render",
     "frontends/cw-tui",
     "tools/pca-fit",
@@ -18,6 +19,7 @@ repository = "https://github.com/Finn-Wyll/coverwave"
 [workspace.dependencies]
 cw-analysis = { path = "crates/cw-analysis" }
 cw-core = { path = "crates/cw-core" }
+cw-library = { path = "crates/cw-library" }
 cw-render = { path = "crates/cw-render" }
 cw-audio = { path = "crates/cw-audio" }
 

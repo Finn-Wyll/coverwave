@@ -81,6 +81,12 @@ pub fn cache_dir() -> Option<PathBuf> {
     xdg_dir("XDG_CACHE_HOME", ".cache")
 }
 
+/// `$XDG_DATA_HOME/coverwave`, else `~/.local/share/coverwave`: library
+/// database, playlists, saved queue.
+pub fn data_dir() -> Option<PathBuf> {
+    xdg_dir("XDG_DATA_HOME", ".local/share")
+}
+
 /// `$XDG_CONFIG_HOME/coverwave`, else `~/.config/coverwave`.
 pub fn config_dir() -> Option<PathBuf> {
     xdg_dir("XDG_CONFIG_HOME", ".config")

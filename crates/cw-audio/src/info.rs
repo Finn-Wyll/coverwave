@@ -7,15 +7,18 @@ pub const AUDIO_EXTENSIONS: &[&str] = &[
     "webm",
 ];
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TrackInfo {
     pub title: String,
     pub artist: Option<String>,
     pub album: Option<String>,
+    pub album_artist: Option<String>,
+    pub track_no: Option<u32>,
+    pub disc_no: Option<u32>,
     pub duration_secs: Option<f64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Track {
     pub path: PathBuf,
     pub info: TrackInfo,
@@ -44,6 +47,12 @@ impl Track {
                 }
                 info.artist = clean(tag.artist());
                 info.album = clean(tag.album());
+                info.album_artist = clean(
+                    tag.get_string(lofty::tag::ItemKey::AlbumArtist)
+                        .map(Into::into),
+                );
+                info.track_no = tag.track();
+                info.disc_no = tag.disk();
             }
         }
         Track { path, info }

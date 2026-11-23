@@ -50,10 +50,12 @@ pub struct RecipeContext {
     pub model: ModelHandle,
 }
 
-type Message = (usize, Result<CoverEntry, String>);
+type Message = (PathBuf, Result<CoverEntry, String>);
 
 pub struct CoverLoader {
-    slots: HashMap<usize, Slot>,
+    /// Keyed by audio file path, so a replaced queue never shows a stale
+    /// cover.
+    slots: HashMap<PathBuf, Slot>,
     by_seed: HashMap<u64, Arc<CoverEntry>>,
     ctx: Arc<RecipeContext>,
     tx: Sender<Message>,
@@ -76,13 +78,15 @@ impl CoverLoader {
         &self.ctx.model
     }
 
-    /// Starts loading the cover for track `index` unless it is already
-    /// loaded or loading.
-    pub fn request(&mut self, index: usize, path: PathBuf) {
-        if self.slots.contains_key(&index) {
+    /// Starts loading the cover for the audio file at `path` unless it is
+    /// already loaded or loading.
+    pub fn request(&mut self, path: &std::path::Path) {
+        if self.slots.contains_key(path) {
             return;
         }
-        self.slots.insert(index, Slot::Loading);
+        let path = path.to_path_buf();
+        let key = path.clone();
+        self.slots.insert(key.clone(), Slot::Loading);
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         let spawned = std::thread::Builder::new()
@@ -100,17 +104,17 @@ impl CoverLoader {
                         CoverEntry { id, cover, recipe }
                     });
                 // The receiver only disappears when the app is quitting.
-                let _ = tx.send((index, result));
+                let _ = tx.send((path, result));
             });
         if let Err(e) = spawned {
             self.slots
-                .insert(index, Slot::Missing(format!("cannot start loader: {e}")));
+                .insert(key, Slot::Missing(format!("cannot start loader: {e}")));
         }
     }
 
     /// Collects finished loads. Call once per frame.
     pub fn poll(&mut self) {
-        while let Ok((index, result)) = self.rx.try_recv() {
+        while let Ok((path, result)) = self.rx.try_recv() {
             let slot = match result {
                 Ok(entry) => {
                     let shared = self
@@ -122,12 +126,12 @@ impl CoverLoader {
                 }
                 Err(e) => Slot::Missing(e),
             };
-            self.slots.insert(index, slot);
+            self.slots.insert(path, slot);
         }
     }
 
-    pub fn get(&self, index: usize) -> Option<&Slot> {
-        self.slots.get(&index)
+    pub fn get(&self, path: &std::path::Path) -> Option<&Slot> {
+        self.slots.get(path)
     }
 
     /// Forgets finished entries matching `pred`, so the next request loads

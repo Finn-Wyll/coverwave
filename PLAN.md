@@ -261,6 +261,22 @@ trait SystemCapture { fn start(&mut self, sink: Producer<f32>) -> Result<()>; fn
   3. Optional LRCLIB lookup, off by default and cached.
 - Rendered as a centred line plus a dimmer line above and below, drawn as HUD cells (protected), and timed to playback position with an offset key.
 
+*As built in M6:*
+- **Index:** one table of tracks. Artists and albums are derived by grouping on album artist, falling back to artist, then "Unknown artist"/"Unknown album". There is no `cover_hash` column: covers stay keyed by their own hash in the recipe cache. The UI holds one connection and a background scan thread holds another (WAL, 5s busy timeout). Scans are incremental (mtime + size) and remove vanished files. The folders come from `music_dirs` in the config (default `~/Music`), scanned at every start.
+- **Watching folders with `notify` is not done yet:** restart to pick up changes.
+- **Browser:** a drill-down stack (Library → Artists → Albums → tracks, plus Albums, Playlists, All tracks and Search).
+  - `enter` opens an entry, or plays its list from the selected track. That replaces the queue, keeping shuffle and repeat.
+  - `a` appends the selected track, or everything under the selected entry.
+  - `backspace`/`esc` go back.
+- **Search:** live as you type; `enter` plays the results from the selection, `tab` appends. Ranking is the nucleo score × (1 + up to 0.35 for play count + up to 0.15 for being played in the last weeks).
+- **Player queue:** the player now accepts a whole new list (`replace`) or a track at the end (`append`). Snapshots carry a generation counter so the UI never pairs an old index with a new list. Covers are keyed by file path for the same reason.
+- **Saved queue:** saved on quit to `~/.local/share/coverwave/queue.json` (paths, current track, position, shuffle, repeat, volume). It is restored, paused, when coverwave starts without file arguments.
+- **Play counts:** a play counts when half the track (or 4 minutes) has been heard.
+- **Lyrics:** sidecar `.lrc` (matched case-insensitively), then embedded lyrics text (USLT, or FLAC/MP4 lyrics fields, parsed as LRC when they carry timestamps). LRC `[offset:]` is honoured. Unsynced lyrics scroll evenly through the song.
+  - Not supported yet: ID3 `SYLT` (lofty exposes it only as raw binary) and LRCLIB lookup.
+  - `[`/`]` shift lyrics by 0.25s for the session.
+- **Not done:** the small ASCII thumbnail of the selected album in the browser.
+
 ---
 
 ## 11. UI (`cw-tui`)
@@ -277,8 +293,8 @@ trait SystemCapture { fn start(&mut self, sink: Producer<f32>) -> Result<()>; fn
 | `←` `→` | seek ±5s (`shift` for ±30s) |
 | `+` `-` | volume |
 | `s` / `r` | shuffle / repeat cycle |
-| `/` | fuzzy search |
-| `enter` | play selection / `a` add to queue |
+| `/` | fuzzy search (`enter` plays, `tab` adds) |
+| `enter` | open, or play from the selected track / `a` add to queue / `backspace` back |
 | `P` | save the queue as a playlist |
 | `l` | toggle lyrics, `[` `]` shift lyric offset |
 | `S` | switch source (Local / Spotify / Apple Music) |
@@ -296,7 +312,7 @@ Terminal handling: an alternate screen, raw mode, hidden cursor, restored on pan
 
 ## 12. Config
 
-`~/.config/coverwave/config.toml`
+`~/.config/coverwave/config.toml` (*M6:* implemented and written with comments on first run. Command-line flags override it. `music_dirs`, `fps`, `color`, `art_style`, `cell_aspect`, `offline`, `motion` work; `change_budget` and `charset` are accepted but not used yet.)
 ```toml
 music_dirs = ["~/Music"]
 fps = 30
@@ -326,7 +342,7 @@ Each milestone ends with something runnable.
 | M3 | Audio analysis | Live bands + onsets shown in the `D` overlay and visibly tracking the music. **Done.** |
 | M4 | Analysis pipeline | MobileCLIP + PCA + features + mask + seed produce a cached recipe JSON; `tools/pca-fit` produces `pca.bin`. **Done.** The shipped `pca.bin` is provisional (see risks). |
 | M5 | Renderer + layers | All 8 scene layers, constraints (subject protection, seamless loop, change budget), audio modulation. **Done** (all 14 layer kinds). |
-| M6 | Library, search, queue, playlists, lyrics | SQLite index, fuzzy search, m3u8 playlists, .lrc/embedded lyrics synced |
+| M6 | Library, search, queue, playlists, lyrics | SQLite index, fuzzy search, m3u8 playlists, .lrc/embedded lyrics synced. **Done** (no folder watching, SYLT, LRCLIB or browser thumbnails yet). |
 | M7 | System capture + Spotify + Apple Music | macOS tap/SCK capture, Spotify PKCE control, Music.app control, source switching |
 | M8 | Windows | WASAPI loopback, path/config differences, CI build on Windows |
 

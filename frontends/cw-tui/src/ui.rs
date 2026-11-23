@@ -54,7 +54,43 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::Art => draw_art(f, app, main),
         Mode::Library => draw_library(f, app, main),
     }
+    if app.mode == Mode::Art && app.show_lyrics {
+        draw_lyrics(f, app, main);
+    }
     draw_hud(f, app, hud);
+    let bottom = Rect {
+        y: main.bottom().saturating_sub(1),
+        height: 1.min(main.height),
+        ..main
+    };
+    if let Some(text) = &app.prompt {
+        let line = Line::from(vec![
+            Span::styled(" Save queue as playlist: ", Style::new().fg(FG)),
+            Span::styled(text.clone(), Style::new().fg(accent(app))),
+            Span::styled("_", Style::new().fg(DIM)),
+            dim("   enter saves, esc cancels"),
+        ]);
+        f.render_widget(
+            Paragraph::new(line).style(Style::new().bg(SELECTED_BG)),
+            bottom,
+        );
+    } else if let Some(msg) = app.status_text() {
+        let line = Line::from(Span::styled(format!(" {msg} "), Style::new().fg(FG)));
+        f.render_widget(
+            Clear,
+            Rect {
+                width: (msg.chars().count() as u16 + 2).min(bottom.width),
+                ..bottom
+            },
+        );
+        f.render_widget(
+            Paragraph::new(line).style(Style::new().bg(SELECTED_BG)),
+            Rect {
+                width: (msg.chars().count() as u16 + 2).min(bottom.width),
+                ..bottom
+            },
+        );
+    }
     match app.debug_page {
         DebugPage::Off => {}
         DebugPage::Stats => draw_debug(f, app, main),
@@ -187,6 +223,61 @@ fn draw_art(f: &mut Frame, app: &mut App, area: Rect) {
     app.prev_art = Some(grid);
 }
 
+/// Three lyric lines (previous, current, next) centred above the HUD. They
+/// are drawn after the art, so motion never runs through them.
+fn draw_lyrics(f: &mut Frame, app: &App, main: Rect) {
+    let Some(lyrics) = app.current_lyrics() else {
+        return;
+    };
+    let Some(snap) = app.snapshot.as_ref() else {
+        return;
+    };
+    let n = lyrics.lines.len();
+    if n == 0 || main.height < 6 {
+        return;
+    }
+    let pos = snap.position_secs + app.lyrics_offset;
+    let current = if lyrics.synced {
+        lyrics.index_at(pos)
+    } else {
+        // Unsynced: scroll evenly through the song.
+        snap.duration_secs
+            .filter(|d| *d > 0.0)
+            .map(|d| ((pos / d).clamp(0.0, 0.999) * n as f64) as usize)
+    };
+    let rows = [
+        current.and_then(|i| i.checked_sub(1)),
+        current,
+        current.map_or(Some(0), |i| (i + 1 < n).then_some(i + 1)),
+    ];
+    let top = main.bottom().saturating_sub(4);
+    for (k, idx) in rows.iter().enumerate() {
+        let Some(i) = idx else { continue };
+        let text = lyrics.lines[*i].text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let text = fit(text, main.width.saturating_sub(4) as usize);
+        let w = text.chars().count() as u16 + 2;
+        let area = Rect {
+            x: main.x + main.width.saturating_sub(w) / 2,
+            y: top + k as u16,
+            width: w.min(main.width),
+            height: 1,
+        };
+        let style = if k == 1 {
+            Style::new().fg(FG).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(DIM)
+        };
+        f.render_widget(Clear, area);
+        f.render_widget(
+            Paragraph::new(Span::styled(format!(" {text} "), style)).style(Style::new().bg(BG)),
+            area,
+        );
+    }
+}
+
 /// Copies a `CellGrid` into the ratatui buffer.
 struct GridWidget<'a>(&'a CellGrid);
 
@@ -249,45 +340,16 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).areas(area);
 
-    let block = panel("Library");
+    let title = match app.browser.levels.len() {
+        1 if !app.scan_status.is_empty() => format!("Library · {}", app.scan_status),
+        _ => app.browser.current().title.clone(),
+    };
+    let block = panel(&title);
     let inner = block.inner(left);
     f.render_widget(block, left);
-
-    if app.player.is_none() {
-        let msg = app
-            .audio_error
-            .as_deref()
-            .unwrap_or("Audio is unavailable.");
-        let p = Paragraph::new(vec![
-            Line::from(Span::styled("Cannot play audio", Style::new().fg(ERROR))),
-            Line::from(""),
-            Line::from(dim(msg.to_string())),
-        ])
-        .wrap(Wrap { trim: false });
-        f.render_widget(p, inner);
-        return;
-    }
     let playing = app.snapshot.as_ref().and_then(|s| s.track);
     let accent = accent(app);
-
-    if app.track_count() == 0 {
-        let p = Paragraph::new(vec![
-            Line::from("No music loaded."),
-            Line::from(""),
-            Line::from(dim("Start coverwave with files or folders:")),
-            Line::from(Span::styled(
-                "  cw-tui ~/Music/Some\\ Album",
-                Style::new().fg(FG),
-            )),
-            Line::from(""),
-            Line::from(dim("A searchable library arrives in milestone M6.")),
-        ])
-        .wrap(Wrap { trim: false });
-        f.render_widget(p, inner);
-    } else {
-        draw_track_list(f, app, inner, playing);
-    }
-
+    draw_browser(f, app, inner);
     // Queue: the playing track, then what follows in play order.
     let block = panel("Queue");
     let inner = block.inner(right);
@@ -330,49 +392,106 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_track_list(f: &mut Frame, app: &mut App, area: Rect, playing: Option<usize>) {
-    let Some(player) = app.player.as_ref() else {
-        return;
-    };
-    let tracks = player.tracks();
+/// The library browser: the current level's entries, a search line when
+/// searching, and hints when there is nothing to show.
+fn draw_browser(f: &mut Frame, app: &mut App, area: Rect) {
     let accent = accent(app);
+    let playing = app.current_path();
+    let searching = app.browser.in_search();
+    let mut area = area;
+    if searching {
+        let line = Line::from(vec![
+            Span::styled("/ ", Style::new().fg(accent)),
+            Span::styled(app.browser.query.clone(), Style::new().fg(FG)),
+            Span::styled("_", Style::new().fg(DIM)),
+        ]);
+        f.render_widget(Paragraph::new(line), Rect { height: 1, ..area });
+        area.y += 2;
+        area.height = area.height.saturating_sub(2);
+    }
     let rows = area.height as usize;
+    let level = app.browser.levels.last_mut().expect("root level");
+    if level.entries.is_empty() {
+        let hint: Vec<Line> = if searching {
+            vec![Line::from(dim(if app.browser.query.is_empty() {
+                "Type to search titles, artists and albums."
+            } else {
+                "No matches."
+            }))]
+        } else if app.library.is_none() {
+            vec![
+                Line::from("No library database."),
+                Line::from(dim("Files given on the command line still play.")),
+            ]
+        } else {
+            vec![
+                Line::from("Nothing here yet."),
+                Line::from(""),
+                Line::from(dim("coverwave indexes the folders in")),
+                Line::from(Span::styled(
+                    "  ~/.config/coverwave/config.toml",
+                    Style::new().fg(FG),
+                )),
+                Line::from(dim("(music_dirs, default ~/Music). Or start it with")),
+                Line::from(Span::styled(
+                    "  cw-tui ~/Music/Some\\ Album",
+                    Style::new().fg(FG),
+                )),
+            ]
+        };
+        f.render_widget(Paragraph::new(hint).wrap(Wrap { trim: false }), area);
+        return;
+    }
     if rows == 0 {
         return;
     }
-    app.library_cursor = app.library_cursor.min(tracks.len() - 1);
     // Keep the cursor visible, scrolling as little as possible.
-    if app.library_cursor < app.library_offset {
-        app.library_offset = app.library_cursor;
-    } else if app.library_cursor >= app.library_offset + rows {
-        app.library_offset = app.library_cursor + 1 - rows;
+    if level.cursor < level.offset {
+        level.offset = level.cursor;
+    } else if level.cursor >= level.offset + rows {
+        level.offset = level.cursor + 1 - rows;
     }
-
     let width = area.width as usize;
-    let time_w = 7;
-    let lines: Vec<Line> = tracks
+    let detail_w = level
+        .entries
+        .iter()
+        .skip(level.offset)
+        .take(rows)
+        .map(|e| e.detail.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(width / 3);
+    let lines: Vec<Line> = level
+        .entries
         .iter()
         .enumerate()
-        .skip(app.library_offset)
+        .skip(level.offset)
         .take(rows)
-        .map(|(i, t)| {
-            let is_playing = playing == Some(i);
-            let marker = if is_playing {
-                Span::styled("> ", Style::new().fg(accent))
-            } else {
-                Span::raw("  ")
+        .map(|(i, e)| {
+            let is_playing = match e.kind {
+                crate::browse::EntryKind::Track(t) => {
+                    playing.as_ref().is_some_and(|p| *p == level.tracks[t].path)
+                }
+                _ => false,
             };
-            let time = t.info.duration_secs.map(fmt_time).unwrap_or_default();
-            let label_w = width.saturating_sub(2 + time_w);
-            let label = format!("{:<label_w$}", fit(&track_label(t), label_w));
-            let mut style = Style::new().fg(if is_playing { FG } else { DIM });
-            if i == app.library_cursor {
-                style = style.bg(SELECTED_BG).fg(FG);
+            let marker = match (&e.kind, is_playing) {
+                (_, true) => Span::styled("> ", Style::new().fg(accent)),
+                (crate::browse::EntryKind::Open(_), _) => dim("+ "),
+                _ => Span::raw("  "),
+            };
+            let label_w = width.saturating_sub(3 + detail_w);
+            let label = format!("{:<label_w$}", fit(&e.label, label_w));
+            let mut style = Style::new().fg(FG);
+            if i == level.cursor {
+                style = style.bg(SELECTED_BG);
             }
             Line::from(vec![
                 marker,
                 Span::styled(label, style),
-                Span::styled(format!("{time:>time_w$}"), style.fg(DIM)),
+                Span::styled(
+                    format!(" {:>detail_w$}", fit(&e.detail, detail_w)),
+                    style.fg(DIM),
+                ),
             ])
         })
         .collect();
@@ -504,8 +623,8 @@ fn draw_debug(f: &mut Frame, app: &App, main: Rect) {
             "assumed"
         }
     )));
-    let playing = app.snapshot.as_ref().and_then(|s| s.track);
-    let cover = match playing.and_then(|t| app.covers.get(t)) {
+    let playing = app.current_path();
+    let cover = match playing.as_deref().and_then(|p| app.covers.get(p)) {
         None => "-".to_string(),
         Some(Slot::Loading) => "loading".to_string(),
         Some(Slot::Missing(why)) => why.clone(),
@@ -671,10 +790,16 @@ const KEYS: &[(&str, &str)] = &[
     ("s", "shuffle"),
     ("r", "repeat: off, all, one"),
     ("tab", "art / library"),
+    ("/", "search (enter plays, tab adds)"),
+    ("enter", "open, or play from this track"),
+    ("a", "add to queue"),
+    ("bksp esc", "back"),
+    ("P", "save queue as playlist"),
+    ("l", "lyrics on / off"),
+    ("[  ]", "lyrics earlier / later"),
     ("c", "cover style (palette, true, duo)"),
     ("m", "motion on / off"),
     ("up  down", "move in library (or j k)"),
-    ("enter", "play selected"),
     ("D", "debug overlay: stats, recipe, off"),
     ("R", "reload the cover's recipe"),
     ("?", "close this help"),

@@ -1,0 +1,15 @@
+[package]
+name = "cw-library"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cw-audio.workspace = true
+lofty = "0.25.5"
+nucleo-matcher = "0.3"
+rusqlite = { version = "0.43", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
