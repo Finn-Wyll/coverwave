@@ -4,8 +4,12 @@
 //! grid for the same arguments, and every animation must loop seamlessly over
 //! `loop_frames` (see PLAN.md section 6).
 //!
-//! M0 only ships the idle scene shown before anything is playing. The recipe
-//! driven renderer lands in M5.
+//! Ships the idle scene (shown when nothing with cover art is playing) and
+//! the static ASCII cover art ([`art`]). The recipe-driven renderer lands in
+//! M5.
+
+pub mod art;
+pub use art::{ArtParams, DEFAULT_CELL_ASPECT, base_art, fit_cells};
 
 use cw_core::{Cell, CellGrid, Rgb};
 use std::f32::consts::TAU;

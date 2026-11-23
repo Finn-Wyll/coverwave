@@ -3,7 +3,11 @@
 //! Nothing in this crate may depend on a terminal, OS audio, the network or
 //! the filesystem: it is shared with future non-terminal frontends.
 
+pub mod art;
+pub mod color;
 pub mod queue;
+pub use art::{ArtStyle, Palette, RgbImage};
+pub use color::{Lab, ansi256};
 pub use queue::{Queue, Repeat};
 
 /// A 24-bit colour.

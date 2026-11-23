@@ -3,7 +3,7 @@
 Terminal music player in Rust. It renders the album cover as ASCII, and each cover gets its own audio-reactive motion. The full design, crate layout and milestones are in [PLAN.md](PLAN.md). Read it before making architectural changes, and update it when a decision changes.
 
 ## Status
-M0 (workspace + TUI shell) and M1 (local playback) done. Next up: M2 (static ASCII album art). Track progress against the milestone table in PLAN.md section 13. Crates are only added when their milestone starts. The workspace currently holds `cw-core` (shared types + play queue), `cw-render`, `cw-audio` (decode/resample/playback) and `cw-tui`.
+M0 (workspace + TUI shell), M1 (local playback) and M2 (static ASCII album art) done. Next up: M3 (audio analysis: FFT bands + onsets in the `D` overlay). Track progress against the milestone table in PLAN.md section 13. Crates are only added when their milestone starts. The workspace currently holds `cw-core` (shared types, colour maths, play queue), `cw-analysis` (cover decode, seed, k-means palette), `cw-render` (idle scene + static base art), `cw-audio` (decode/resample/playback, cover-art lookup) and `cw-tui`.
 
 ## Commands
 - Run: `cargo run -p cw-tui --release -- <files or folders>` (`?` shows keys in the app)
@@ -16,6 +16,7 @@ M0 (workspace + TUI shell) and M1 (local playback) done. Next up: M2 (static ASC
 - Verify playback logic headlessly with the `probe` example and unit tests. Leave interactive checks (keys, listening for gaps) to the owner, and say so in reports.
 - ffmpeg may not be installed. Tests write their own WAV fixtures, so they don't need it.
 - On Linux, cpal needs ALSA headers to build (`libasound2-dev` and `pkg-config`).
+- To drive the real app headlessly (screenshots, track changes), give it a real-time fake device: install `pulseaudio libasound2-plugins`, then run `pulseaudio -D`, `pactl load-module module-null-sink sink_name=nul` and `pactl set-default-sink nul`, with `~/.asoundrc` set to `pcm.!default { type pulse }`. ALSA's own `null` device has no clock, so tracks "finish" instantly.
 
 ## Audio design notes (cw-audio)
 - Three threads: the cpal callback (ring buffer + atomics only), the decoder thread (owns `Queue` and the open `TrackReader`, decodes ~0.75s ahead), and the UI thread (sends `Command`s, reads a `Snapshot` per frame).

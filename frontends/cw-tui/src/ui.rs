@@ -1,7 +1,8 @@
-use crate::app::{App, Mode};
+use crate::app::{App, ArtCache, ColorMode, Mode};
+use crate::cover::Slot;
 use cw_audio::{Status, Track};
-use cw_core::{CellGrid, Repeat, Rgb};
-use cw_render::{DEFAULT_LOOP_FRAMES, IdleStyle};
+use cw_core::{CellGrid, Repeat, Rgb, ansi256};
+use cw_render::{ArtParams, DEFAULT_LOOP_FRAMES, IdleStyle};
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -14,17 +15,25 @@ use ratatui::{
 const MIN_WIDTH: u16 = 40;
 const MIN_HEIGHT: u16 = 12;
 
-const BG: Color = Color::Rgb(14, 15, 18);
+const BG_RGB: Rgb = Rgb(14, 15, 18);
+const BG: Color = Color::Rgb(BG_RGB.0, BG_RGB.1, BG_RGB.2);
 const FG: Color = Color::Rgb(196, 204, 214);
 const DIM: Color = Color::Rgb(98, 104, 114);
 const BORDER: Color = Color::Rgb(48, 52, 60);
 const SELECTED_BG: Color = Color::Rgb(30, 33, 39);
-/// The single accent until covers provide their own palette (M2).
+/// Accent used when the playing track has no cover art.
 const ACCENT: Color = Color::Rgb(214, 170, 110);
 const ERROR: Color = Color::Rgb(206, 120, 110);
 
 fn color(c: Rgb) -> Color {
     Color::Rgb(c.0, c.1, c.2)
+}
+
+/// The one accent colour: from the shown cover's palette when there is one.
+fn accent(app: &App) -> Color {
+    app.shown_cover
+        .as_ref()
+        .map_or(ACCENT, |c| color(c.palette.accent))
 }
 
 fn dim(s: impl Into<String>) -> Span<'static> {
@@ -52,6 +61,21 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.show_help {
         draw_help(f, main);
     }
+    if app.color_mode == ColorMode::Ansi256 {
+        to_ansi256(f.buffer_mut());
+    }
+}
+
+/// Rewrites every 24-bit colour in the frame to its nearest xterm-256 index.
+fn to_ansi256(buf: &mut Buffer) {
+    let map = |c: Color| match c {
+        Color::Rgb(r, g, b) => Color::Indexed(ansi256(Rgb(r, g, b))),
+        other => other,
+    };
+    for cell in buf.content.iter_mut() {
+        cell.fg = map(cell.fg);
+        cell.bg = map(cell.bg);
+    }
 }
 
 fn draw_too_small(f: &mut Frame, area: Rect) {
@@ -77,14 +101,50 @@ fn draw_too_small(f: &mut Frame, area: Rect) {
 }
 
 fn draw_art(f: &mut Frame, app: &mut App, area: Rect) {
-    let grid = cw_render::idle(
-        area.width,
-        area.height,
-        app.frame,
-        DEFAULT_LOOP_FRAMES,
-        app.idle_seed,
-        IdleStyle::default(),
-    );
+    let grid = match app.shown_cover.clone() {
+        Some(cover) => {
+            let fresh = app.art_cache.as_ref().is_some_and(|c| {
+                c.seed == cover.seed
+                    && (c.width, c.height) == (area.width, area.height)
+                    && c.style == app.art_style
+                    && c.cell_aspect == app.cell_aspect
+            });
+            if !fresh {
+                // Only on cover, size, style or aspect changes: never per frame.
+                let params = ArtParams {
+                    cell_aspect: app.cell_aspect,
+                    style: app.art_style,
+                    background: BG_RGB,
+                };
+                app.art_cache = Some(ArtCache {
+                    seed: cover.seed,
+                    width: area.width,
+                    height: area.height,
+                    style: app.art_style,
+                    cell_aspect: app.cell_aspect,
+                    grid: cw_render::base_art(
+                        &cover.image,
+                        &cover.palette,
+                        area.width,
+                        area.height,
+                        params,
+                    ),
+                });
+            }
+            app.art_cache
+                .as_ref()
+                .map(|c| c.grid.clone())
+                .unwrap_or_else(|| CellGrid::new(0, 0))
+        }
+        None => cw_render::idle(
+            area.width,
+            area.height,
+            app.frame,
+            DEFAULT_LOOP_FRAMES,
+            app.idle_seed,
+            IdleStyle::default(),
+        ),
+    };
     let total = (grid.width() as usize * grid.height() as usize).max(1);
     app.last_change_pct = match &app.prev_art {
         Some(prev) => 100.0 * grid.diff_count(prev) as f32 / total as f32,
@@ -175,6 +235,7 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     let playing = app.snapshot.as_ref().and_then(|s| s.track);
+    let accent = accent(app);
 
     if app.track_count() == 0 {
         let p = Paragraph::new(vec![
@@ -217,7 +278,7 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
         let label = fit(&track_label(&tracks[t]), width.saturating_sub(2));
         if i == 0 && playing.is_some() {
             lines.push(Line::from(vec![
-                Span::styled("> ", Style::new().fg(ACCENT)),
+                Span::styled("> ", Style::new().fg(accent)),
                 Span::styled(label, Style::new().fg(FG).add_modifier(Modifier::BOLD)),
             ]));
         } else {
@@ -241,6 +302,7 @@ fn draw_track_list(f: &mut Frame, app: &mut App, area: Rect, playing: Option<usi
         return;
     };
     let tracks = player.tracks();
+    let accent = accent(app);
     let rows = area.height as usize;
     if rows == 0 {
         return;
@@ -263,7 +325,7 @@ fn draw_track_list(f: &mut Frame, app: &mut App, area: Rect, playing: Option<usi
         .map(|(i, t)| {
             let is_playing = playing == Some(i);
             let marker = if is_playing {
-                Span::styled("> ", Style::new().fg(ACCENT))
+                Span::styled("> ", Style::new().fg(accent))
             } else {
                 Span::raw("  ")
             };
@@ -288,6 +350,7 @@ fn draw_hud(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Block::new().style(Style::new().bg(BG)), area);
 
     let key = |k: &'static str| Span::styled(k, Style::new().fg(FG).add_modifier(Modifier::BOLD));
+    let accent = accent(app);
     let snap = app.snapshot.as_ref();
     let current = snap
         .zip(app.player.as_ref())
@@ -322,7 +385,7 @@ fn draw_hud(f: &mut Frame, app: &App, area: Rect) {
     let bar_w = (area.width / 5).clamp(10, 40) as usize;
     let bar = progress_bar(pos, snap.duration_secs, bar_w);
     let mut right = vec![
-        Span::styled(bar.0, Style::new().fg(ACCENT)),
+        Span::styled(bar.0, Style::new().fg(accent)),
         dim(bar.1),
         Span::raw("  "),
         Span::styled(time, Style::new().fg(FG)),
@@ -341,7 +404,7 @@ fn draw_hud(f: &mut Frame, app: &App, area: Rect) {
     let right_w = right.width() as u16;
 
     let glyph = match snap.status {
-        Status::Playing => Span::styled(" > ", Style::new().fg(ACCENT)),
+        Status::Playing => Span::styled(" > ", Style::new().fg(accent)),
         Status::Paused => Span::styled(" ||", Style::new().fg(FG)),
         Status::Stopped => dim(" []"),
     };
@@ -394,7 +457,40 @@ fn draw_debug(f: &mut Frame, app: &App, main: Rect) {
         lines.push(Line::from(format!("status  {:?}", s.status)));
         lines.push(Line::from(format!("pos     {:.2}s", s.position_secs)));
     }
-    let w = 28.min(main.width);
+    lines.push(Line::from(format!(
+        "style   {} / {}",
+        app.art_style.name(),
+        app.color_mode.name()
+    )));
+    lines.push(Line::from(format!(
+        "cell    {:.2} {}",
+        app.cell_aspect,
+        if app.cell_aspect_measured {
+            "measured"
+        } else {
+            "assumed"
+        }
+    )));
+    let playing = app.snapshot.as_ref().and_then(|s| s.track);
+    let cover = match playing.and_then(|t| app.covers.get(t)) {
+        None => "-".to_string(),
+        Some(Slot::Loading) => "loading".to_string(),
+        Some(Slot::Missing(why)) => why.clone(),
+        Some(Slot::Ready(c)) => {
+            format!("{}x{} {:08x}", c.image.width, c.image.height, c.seed >> 32)
+        }
+    };
+    lines.push(Line::from(format!("cover   {}", fit(&cover, 18))));
+    if let Some(c) = &app.shown_cover {
+        let mut swatches = vec![Span::raw("palette ")];
+        for &col in &c.palette.colors {
+            swatches.push(Span::styled("  ", Style::new().bg(color(col))));
+        }
+        swatches.push(Span::raw(" "));
+        swatches.push(Span::styled("  ", Style::new().bg(color(c.palette.accent))));
+        lines.push(Line::from(swatches));
+    }
+    let w = 32.min(main.width);
     let h = (lines.len() as u16 + 2).min(main.height);
     let area = Rect {
         x: main.right().saturating_sub(w + 1),
@@ -419,6 +515,7 @@ const KEYS: &[(&str, &str)] = &[
     ("s", "shuffle"),
     ("r", "repeat: off, all, one"),
     ("tab", "art / library"),
+    ("c", "cover style (palette, true, duo)"),
     ("up  down", "move in library (or j k)"),
     ("enter", "play selected"),
     ("D", "debug overlay"),
@@ -439,7 +536,7 @@ fn draw_help(f: &mut Frame, main: Rect) {
             ])
         })
         .collect();
-    let w = 40.min(main.width);
+    let w = 48.min(main.width);
     let h = (lines.len() as u16 + 2).min(main.height);
     let area = Rect {
         x: main.x + (main.width - w) / 2,

@@ -183,8 +183,18 @@ Users can override a recipe by dropping an edited copy in `~/.config/coverwave/o
 ## 7. Rendering pipeline (`cw-render`)
 
 Per terminal size (recomputed only on resize):
-1. Fit the cover to the cell grid, correcting for the cell aspect ratio (about 1:2; the terminal's ratio is read when possible).
-2. Precompute the **base art**: luminance → charset index, colour → nearest palette entry blended toward the true colour (truecolor), with a 256-colour fallback.
+1. Fit the **whole** cover to the cell grid, centred, correcting for the cell aspect ratio. Covers are never cropped, and the near-black margins beside them are where effects can live later. The cell aspect is measured from the terminal's pixel size when it reports one, otherwise 0.5, and `--cell-aspect` overrides it.
+2. Precompute the **base art** (`cw_render::base_art`, decided in M2):
+   - The cover is area-averaged in linear light to one sample per cell.
+   - Density comes from CIE L*, contrast-stretched per cover (2nd to 98th percentile, never to less than 45 L* units so flat covers don't turn into noise), and mapped onto the ASCII ramp `" .:-=+*#%@"`.
+   - Glyph colour depends on the **art style**, a user setting (`--art-style`, cycled with `c`):
+     - `palette` (default): the nearest of the 5 palette colours, blended 35% back toward the true colour.
+     - `truecolor`: the pixel's own colour.
+     - `duotone`: a ramp from a dark tint of the darkest palette colour to the accent.
+
+     `palette` and `truecolor` raise dark colours (L* → 30 + 0.7·L*) so sparse glyphs stay readable.
+   - Accent: the most colourful palette cluster (chroma × weight^0.35), with its lightness clamped to L* 62–84 and its chroma reduced until it is in gamut. Greyscale covers get a light neutral.
+   - Colour reaches the terminal as 24-bit when `COLORTERM` is `truecolor`/`24bit`, otherwise as the nearest xterm-256 index (`--color` overrides). The frontend converts the whole frame, so the grid stays RGB.
 3. Resample the subject mask to cells.
 
 Per frame:
@@ -283,7 +293,9 @@ Terminal handling: an alternate screen, raw mode, hidden cursor, restored on pan
 ```toml
 music_dirs = ["~/Music"]
 fps = 30
-color = "auto"          # auto | truecolor | 256 | mono
+color = "auto"          # auto | truecolor | 256 | mono  (M2: --color flag)
+art_style = "palette"   # palette | truecolor | duotone  (M2: --art-style flag, `c` key)
+cell_aspect = "auto"    # auto (measured) | number  (M2: --cell-aspect flag)
 charset = "auto"        # auto (from style DNA) | sparse | standard | blocks
 change_budget = 0.15
 [spotify]
@@ -302,7 +314,7 @@ Each milestone ends with something runnable.
 |---|---|---|
 | M0 | Workspace + TUI shell | `cargo run` opens a 30fps ratatui loop with mode switching and clean exit/panic restore |
 | M1 | Local playback | Plays a folder of files with transport keys, seek, volume, gapless queue |
-| M2 | Static ASCII art | Embedded/folder art rendered with aspect correction, palette (k-means), truecolor + 256 fallback |
+| M2 | Static ASCII art | Embedded/folder art rendered with aspect correction, palette (k-means), truecolor + 256 fallback. **Done.** `cw-analysis` (decode, seed, palette) started early for this. Art lookup lives in `cw-audio::cover_art` until `cw-sources` exists. |
 | M3 | Audio analysis | Live bands + onsets shown in the `D` overlay and visibly tracking the music |
 | M4 | Analysis pipeline | MobileCLIP + PCA + features + mask + seed produce a cached recipe JSON; `tools/pca-fit` produces `pca.bin` |
 | M5 | Renderer + layers | All 8 scene layers, constraints (subject protection, seamless loop, change budget), audio modulation |

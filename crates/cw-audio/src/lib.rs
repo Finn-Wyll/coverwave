@@ -13,7 +13,7 @@ mod info;
 mod player;
 mod reader;
 
-pub use info::{AUDIO_EXTENSIONS, Track, TrackInfo, collect_audio_files, is_audio_file};
+pub use info::{AUDIO_EXTENSIONS, Track, TrackInfo, collect_audio_files, cover_art, is_audio_file};
 pub use player::{Player, Snapshot, Status};
 
 /// Decodes a whole file at `out_rate` without playing it and returns the

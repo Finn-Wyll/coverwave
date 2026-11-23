@@ -1,0 +1,7 @@
+---
+source: crates/cw-render/src/art.rs
+expression: out
+---
+palette: ea814d ef854b f4884a ff9a45 ff9d45 f88b4a f3884b ef844c
+truecolor: da7450 e87f4d f6894a ff9447 ff9b45 ff9148 f3874b e67c4e
+duotone: 956656 a87056 b97955 cc8354 d88953 c98154 b77855 a56e56

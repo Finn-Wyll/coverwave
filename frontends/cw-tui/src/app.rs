@@ -1,6 +1,10 @@
+use crate::cover::{CoverLoader, Slot};
+use cw_analysis::Cover;
 use cw_audio::{Player, Snapshot};
+use cw_core::{ArtStyle, CellGrid};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +20,73 @@ impl Mode {
             Mode::Library => Mode::Art,
         }
     }
+}
+
+/// How colours reach the terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorMode {
+    TrueColor,
+    /// xterm 256-colour palette, for terminals without 24-bit colour (for
+    /// example macOS Terminal.app before macOS 26).
+    Ansi256,
+}
+
+impl ColorMode {
+    /// `COLORTERM=truecolor|24bit` means 24-bit colour; anything else gets the
+    /// 256-colour fallback, which every modern terminal supports.
+    pub fn detect() -> ColorMode {
+        match std::env::var("COLORTERM") {
+            Ok(v) if v.eq_ignore_ascii_case("truecolor") || v.eq_ignore_ascii_case("24bit") => {
+                ColorMode::TrueColor
+            }
+            _ => ColorMode::Ansi256,
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<ColorMode> {
+        match s.to_ascii_lowercase().as_str() {
+            "truecolor" | "24bit" => Some(ColorMode::TrueColor),
+            "256" => Some(ColorMode::Ansi256),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ColorMode::TrueColor => "truecolor",
+            ColorMode::Ansi256 => "256",
+        }
+    }
+}
+
+/// Startup settings from the command line.
+#[derive(Debug, Clone, Copy)]
+pub struct Settings {
+    pub art_style: ArtStyle,
+    pub color_mode: ColorMode,
+    /// Fixed cell width/height; `None` measures the terminal.
+    pub cell_aspect: Option<f32>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            art_style: ArtStyle::default(),
+            color_mode: ColorMode::TrueColor,
+            cell_aspect: None,
+        }
+    }
+}
+
+/// The ASCII art for one cover at one size and style, kept until any of
+/// those change.
+pub struct ArtCache {
+    pub seed: u64,
+    pub width: u16,
+    pub height: u16,
+    pub style: ArtStyle,
+    pub cell_aspect: f32,
+    pub grid: CellGrid,
 }
 
 pub struct App {
@@ -41,6 +112,18 @@ pub struct App {
     pub library_cursor: usize,
     /// First visible row of the library list.
     pub library_offset: usize,
+    pub art_style: ArtStyle,
+    pub color_mode: ColorMode,
+    /// Cell width / height used to keep covers in proportion.
+    pub cell_aspect: f32,
+    /// Whether `cell_aspect` was measured from the terminal (debug overlay).
+    pub cell_aspect_measured: bool,
+    cell_aspect_fixed: bool,
+    pub covers: CoverLoader,
+    /// The cover shown in Art mode. Kept while the next track's cover loads,
+    /// so a track change does not flash the idle scene.
+    pub shown_cover: Option<Arc<Cover>>,
+    pub art_cache: Option<ArtCache>,
     frame_times: VecDeque<Instant>,
 }
 
@@ -49,7 +132,12 @@ const SEEK_LARGE: f64 = 30.0;
 const VOLUME_STEP: u8 = 5;
 
 impl App {
-    pub fn new(fps: u32, player: Option<Player>, audio_error: Option<String>) -> Self {
+    pub fn new(
+        fps: u32,
+        player: Option<Player>,
+        audio_error: Option<String>,
+        settings: Settings,
+    ) -> Self {
         App {
             mode: Mode::Art,
             fps,
@@ -65,6 +153,16 @@ impl App {
             snapshot: None,
             library_cursor: 0,
             library_offset: 0,
+            art_style: settings.art_style,
+            color_mode: settings.color_mode,
+            cell_aspect: settings
+                .cell_aspect
+                .unwrap_or(cw_render::DEFAULT_CELL_ASPECT),
+            cell_aspect_measured: false,
+            cell_aspect_fixed: settings.cell_aspect.is_some(),
+            covers: CoverLoader::new(),
+            shown_cover: None,
+            art_cache: None,
             frame_times: VecDeque::with_capacity(64),
         }
     }
@@ -76,6 +174,58 @@ impl App {
     /// Refreshes the playback snapshot; call once before drawing a frame.
     pub fn tick(&mut self) {
         self.snapshot = self.player.as_ref().map(Player::snapshot);
+        self.covers.poll();
+        self.update_cover();
+    }
+
+    /// Requests covers for the playing track and the one after it (so a
+    /// track change usually finds its art ready), and picks what Art mode
+    /// shows.
+    fn update_cover(&mut self) {
+        let (Some(snap), Some(player)) = (self.snapshot.as_ref(), self.player.as_ref()) else {
+            return;
+        };
+        let Some(current) = snap.track else {
+            self.shown_cover = None;
+            return;
+        };
+        let tracks = player.tracks();
+        let next = snap
+            .order
+            .iter()
+            .position(|&o| o == current)
+            .and_then(|i| snap.order.get(i + 1))
+            .copied();
+        for t in std::iter::once(current).chain(next) {
+            self.covers.request(t, tracks[t].path.clone());
+        }
+        match self.covers.get(current) {
+            Some(Slot::Ready(c)) => self.shown_cover = Some(c.clone()),
+            Some(Slot::Missing(_)) => self.shown_cover = None,
+            Some(Slot::Loading) | None => {} // keep the previous cover a moment
+        }
+    }
+
+    /// Measures the cell aspect ratio from the terminal's pixel size, when
+    /// the terminal reports one and no fixed value was given.
+    pub fn measure_cell_aspect(&mut self) {
+        if self.cell_aspect_fixed {
+            return;
+        }
+        if let Ok(ws) = ratatui::crossterm::terminal::window_size()
+            && ws.columns > 0
+            && ws.rows > 0
+            && ws.width > 0
+            && ws.height > 0
+        {
+            let cell_w = ws.width as f32 / ws.columns as f32;
+            let cell_h = ws.height as f32 / ws.rows as f32;
+            let aspect = cell_w / cell_h;
+            if (0.25..=1.0).contains(&aspect) {
+                self.cell_aspect = aspect;
+                self.cell_aspect_measured = true;
+            }
+        }
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
@@ -90,6 +240,7 @@ impl App {
             KeyCode::Tab => self.mode = self.mode.next(),
             KeyCode::Char('D') => self.show_debug = !self.show_debug,
             KeyCode::Char('?') => self.show_help = !self.show_help,
+            KeyCode::Char('c') => self.art_style = self.art_style.next(),
             _ => self.on_playback_key(key.code, shift),
         }
     }
@@ -174,13 +325,15 @@ mod tests {
 
     #[test]
     fn tab_cycles_modes_and_q_quits() {
-        let mut app = App::new(30, None, None);
+        let mut app = App::new(30, None, None, Settings::default());
         app.on_key(press(KeyCode::Tab));
         assert_eq!(app.mode, Mode::Library);
         app.on_key(press(KeyCode::Tab));
         assert_eq!(app.mode, Mode::Art);
         app.on_key(press(KeyCode::Char('D')));
         assert!(app.show_debug);
+        app.on_key(press(KeyCode::Char('c')));
+        assert_eq!(app.art_style, ArtStyle::TrueColor);
         // Playback keys without a player are ignored, not a crash.
         app.on_key(press(KeyCode::Char(' ')));
         app.on_key(press(KeyCode::Right));

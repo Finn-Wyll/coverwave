@@ -7,3 +7,6 @@ repository.workspace = true
 
 [dependencies]
 cw-core.workspace = true
+
+[dev-dependencies]
+insta = "1.49.0"
