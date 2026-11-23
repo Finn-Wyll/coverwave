@@ -1,7 +1,7 @@
 use crate::cover::{CoverLoader, Slot};
 use cw_analysis::Cover;
 use cw_audio::{Player, Snapshot};
-use cw_core::{ArtStyle, CellGrid};
+use cw_core::{ArtStyle, AudioFrame, CellGrid};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -108,6 +108,8 @@ pub struct App {
     pub audio_error: Option<String>,
     /// Snapshot taken once per frame so every widget sees the same state.
     pub snapshot: Option<Snapshot>,
+    /// Music analysis, read once per frame alongside the snapshot.
+    pub audio: AudioFrame,
     /// Highlighted row in the library list.
     pub library_cursor: usize,
     /// First visible row of the library list.
@@ -151,6 +153,7 @@ impl App {
             player,
             audio_error,
             snapshot: None,
+            audio: AudioFrame::default(),
             library_cursor: 0,
             library_offset: 0,
             art_style: settings.art_style,
@@ -174,6 +177,10 @@ impl App {
     /// Refreshes the playback snapshot; call once before drawing a frame.
     pub fn tick(&mut self) {
         self.snapshot = self.player.as_ref().map(Player::snapshot);
+        self.audio = self
+            .player
+            .as_ref()
+            .map_or(AudioFrame::default(), Player::audio_frame);
         self.covers.poll();
         self.update_cover();
     }

@@ -3,12 +3,13 @@
 Terminal music player in Rust. It renders the album cover as ASCII, and each cover gets its own audio-reactive motion. The full design, crate layout and milestones are in [PLAN.md](PLAN.md). Read it before making architectural changes, and update it when a decision changes.
 
 ## Status
-M0 (workspace + TUI shell), M1 (local playback) and M2 (static ASCII album art) done. Next up: M3 (audio analysis: FFT bands + onsets in the `D` overlay). Track progress against the milestone table in PLAN.md section 13. Crates are only added when their milestone starts. The workspace currently holds `cw-core` (shared types, colour maths, play queue), `cw-analysis` (cover decode, seed, k-means palette), `cw-render` (idle scene + static base art), `cw-audio` (decode/resample/playback, cover-art lookup) and `cw-tui`.
+M0 (workspace + TUI shell), M1 (local playback), M2 (static ASCII album art) and M3 (audio analysis) done. Next up: M4 (analysis pipeline: MobileCLIP + PCA + features + subject mask -> recipe JSON). PLAN.md suggests building M5 against a hand-written recipe first. Track progress against the milestone table in PLAN.md section 13. Crates are only added when their milestone starts. The workspace currently holds `cw-core` (shared types, colour maths, play queue), `cw-analysis` (cover decode, seed, k-means palette), `cw-render` (idle scene + static base art), `cw-audio` (decode/resample/playback, cover-art lookup, FFT/onset analyser) and `cw-tui`.
 
 ## Commands
 - Run: `cargo run -p cw-tui --release -- <files or folders>` (`?` shows keys in the app)
 - Check: `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
 - Decode check without playing: `cargo run -p cw-audio --release --example probe -- <files or folders>`
+- Analysis trace without playing: `cargo run -p cw-audio --release --example analyse -- <file>` (bands, level and onsets at 30fps as text)
 - Test audio: generate with ffmpeg (e.g. `ffmpeg -f lavfi -i "sine=frequency=440:duration=10" -metadata title=X a.flac`). Never commit audio files.
 
 ## Working without the owner's Mac (cloud or CI)
@@ -19,7 +20,7 @@ M0 (workspace + TUI shell), M1 (local playback) and M2 (static ASCII album art) 
 - To drive the real app headlessly (screenshots, track changes), give it a real-time fake device: install `pulseaudio libasound2-plugins`, then run `pulseaudio -D`, `pactl load-module module-null-sink sink_name=nul` and `pactl set-default-sink nul`, with `~/.asoundrc` set to `pcm.!default { type pulse }`. ALSA's own `null` device has no clock, so tracks "finish" instantly.
 
 ## Audio design notes (cw-audio)
-- Three threads: the cpal callback (ring buffer + atomics only), the decoder thread (owns `Queue` and the open `TrackReader`, decodes ~0.75s ahead), and the UI thread (sends `Command`s, reads a `Snapshot` per frame).
+- Four threads: the cpal callback (ring buffers + atomics only), the decoder thread (owns `Queue` and the open `TrackReader`, decodes ~0.75s ahead), the analyser thread (drains the callback's pre-volume mono tap into `Analyser`, publishes an `AudioFrame`), and the UI thread (sends `Command`s, reads a `Snapshot` and an `AudioFrame` per frame).
 - Output is always stereo f32 at the device rate. `TrackReader` resamples with rubato and emits exactly `round(frames * ratio)` frames per track, which is what keeps track changes gapless.
 - "What is playing" comes from `Boundary` markers in output-frame time compared with the callback's consumed-frame counter, not from the queue. The decoder is usually already decoding the next track.
 - Seek, skip and jump flush the ring buffer through the callback (`flush` flag) before new audio is pushed.

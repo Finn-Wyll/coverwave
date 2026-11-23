@@ -1,8 +1,9 @@
+use crate::analysis::Analyser;
 use crate::reader::{OUT_CHANNELS, TrackReader};
 use crate::{AudioError, Track};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig};
-use cw_core::{Queue, Repeat};
+use cw_core::{AudioFrame, Queue, Repeat};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -14,6 +15,12 @@ use std::time::{Duration, Instant};
 /// Seconds of audio decoded ahead. Pause and volume act in the callback, and
 /// seeks flush the buffer, so this only costs memory, never latency.
 const BUFFER_SECS: f64 = 0.75;
+/// Seconds of mono audio the analysis tap can hold. The analyser drains it
+/// every few milliseconds; if it ever falls behind, the callback drops
+/// samples rather than wait.
+const TAP_SECS: f64 = 0.25;
+/// How often the analyser thread wakes to drain the tap.
+const ANALYSER_POLL: Duration = Duration::from_millis(4);
 /// "Previous" restarts the current track if more than this has played.
 const PREV_RESTART_SECS: f64 = 3.0;
 
@@ -88,6 +95,7 @@ pub struct Player {
     shared: Arc<Shared>,
     commands: Sender<Command>,
     volume: u8,
+    analysis: Arc<Mutex<AudioFrame>>,
     // Dropping the stream stops audio; keep it alive with the player.
     _stream: cpal::Stream,
 }
@@ -108,6 +116,7 @@ impl Player {
         let out_rate = config.sample_rate;
         let capacity = (out_rate as f64 * BUFFER_SECS) as usize * OUT_CHANNELS;
         let (producer, consumer) = RingBuffer::<f32>::new(capacity);
+        let (tap, tap_out) = RingBuffer::<f32>::new((out_rate as f64 * TAP_SECS) as usize);
 
         let volume = 80;
         let shared = Arc::new(Shared {
@@ -120,11 +129,21 @@ impl Player {
         });
 
         let stream = match format {
-            SampleFormat::F32 => build_stream::<f32>(&device, &config, consumer, shared.clone()),
-            SampleFormat::I16 => build_stream::<i16>(&device, &config, consumer, shared.clone()),
-            SampleFormat::U16 => build_stream::<u16>(&device, &config, consumer, shared.clone()),
-            SampleFormat::I32 => build_stream::<i32>(&device, &config, consumer, shared.clone()),
-            SampleFormat::F64 => build_stream::<f64>(&device, &config, consumer, shared.clone()),
+            SampleFormat::F32 => {
+                build_stream::<f32>(&device, &config, consumer, tap, shared.clone())
+            }
+            SampleFormat::I16 => {
+                build_stream::<i16>(&device, &config, consumer, tap, shared.clone())
+            }
+            SampleFormat::U16 => {
+                build_stream::<u16>(&device, &config, consumer, tap, shared.clone())
+            }
+            SampleFormat::I32 => {
+                build_stream::<i32>(&device, &config, consumer, tap, shared.clone())
+            }
+            SampleFormat::F64 => {
+                build_stream::<f64>(&device, &config, consumer, tap, shared.clone())
+            }
             other => Err(AudioError::Device(format!(
                 "unsupported sample format {other}"
             ))),
@@ -146,11 +165,19 @@ impl Player {
             .spawn(move || decoder.run())
             .map_err(|e| AudioError::Device(format!("decoder thread: {e}")))?;
 
+        let analysis = Arc::new(Mutex::new(AudioFrame::default()));
+        let published = analysis.clone();
+        thread::Builder::new()
+            .name("cw-analyser".into())
+            .spawn(move || run_analyser(tap_out, out_rate, published))
+            .map_err(|e| AudioError::Device(format!("analyser thread: {e}")))?;
+
         Ok(Player {
             tracks,
             shared,
             commands: tx,
             volume,
+            analysis,
             _stream: stream,
         })
     }
@@ -199,6 +226,12 @@ impl Player {
             order: st.order.clone(),
             last_error: st.last_error.clone(),
         }
+    }
+
+    /// The latest music analysis of what is being heard (silence while
+    /// paused or stopped).
+    pub fn audio_frame(&self) -> AudioFrame {
+        *self.analysis.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn toggle_pause(&mut self) {
@@ -290,6 +323,7 @@ fn build_stream<T>(
     device: &cpal::Device,
     config: &StreamConfig,
     mut consumer: Consumer<f32>,
+    mut tap: Producer<f32>,
     shared: Arc<Shared>,
 ) -> Result<cpal::Stream, AudioError>
 where
@@ -315,6 +349,12 @@ where
         let frames = data.len() / channels.max(1);
         if shared.paused.load(Ordering::Relaxed) {
             data.fill(T::from_sample(0.0f32));
+            // Keep the analyser's clock running so its levels fall to zero.
+            for _ in 0..frames {
+                if tap.push(0.0).is_err() {
+                    break;
+                }
+            }
             return;
         }
 
@@ -329,8 +369,13 @@ where
         for frame in data.chunks_mut(channels.max(1)) {
             gain_now += step;
             // Past `available` this is an underrun: play silence.
-            let l = samples.next().unwrap_or(0.0) * gain_now;
-            let r = samples.next().unwrap_or(0.0) * gain_now;
+            let l = samples.next().unwrap_or(0.0);
+            let r = samples.next().unwrap_or(0.0);
+            // The analyser hears the music before the volume control, so
+            // visuals don't shrink when you turn it down. A full tap means
+            // the analyser is behind: drop the sample, never wait.
+            let _ = tap.push((l + r) * 0.5);
+            let (l, r) = (l * gain_now, r * gain_now);
             match frame.len() {
                 1 => frame[0] = T::from_sample((l + r) * 0.5),
                 _ => {
@@ -360,6 +405,27 @@ where
     device
         .build_output_stream(*config, data_fn, err_fn, None)
         .map_err(|e| AudioError::Device(e.to_string()))
+}
+
+/// Drains the callback's mono tap into an [`Analyser`] and publishes each
+/// result. Exits when the stream (and with it the tap's producer) is gone.
+fn run_analyser(mut tap: Consumer<f32>, rate: u32, out: Arc<Mutex<AudioFrame>>) {
+    let mut analyser = Analyser::new(rate);
+    loop {
+        let n = tap.slots();
+        if n > 0 {
+            if let Ok(chunk) = tap.read_chunk(n) {
+                let (a, b) = chunk.as_slices();
+                analyser.push(a);
+                analyser.push(b);
+                chunk.commit_all();
+            }
+            *out.lock().unwrap_or_else(|e| e.into_inner()) = analyser.frame();
+        } else if tap.is_abandoned() {
+            return;
+        }
+        thread::sleep(ANALYSER_POLL);
+    }
 }
 
 /// Owns the queue and the open file; decodes ahead into the ring buffer.

@@ -90,7 +90,7 @@ coverwave/
 
 Threads:
 - **Audio thread** (cpal callback): mixes output, pushes samples into a lock-free ring buffer (`rtrb`).
-- **Analyser thread:** reads the ring buffer, computes FFT bands, and publishes an `AudioFrame` through an atomic snapshot (`arc-swap`).
+- **Analyser thread:** drains a mono tap ring buffer filled by the callback, computes FFT bands and onsets, and publishes an `AudioFrame` behind a `Mutex`. Only the analyser and UI threads touch that lock, never the callback, so `arc-swap` was not needed.
 - **Analysis worker:** runs cover analysis off the UI thread, and the cache makes it near-instant on repeat plays.
 - **UI thread:** fixed 30fps tick (configurable to 60). Reads the latest `AudioFrame`, renders, and diffs to the terminal.
 
@@ -215,12 +215,14 @@ Performance target: under 4ms per frame at 240x70 cells in release builds.
 **Local playback (`cw-audio`)**
 - symphonia decodes into a cpal output stream, with resampling (`rubato`) when the device rate differs.
 - Gapless playback within the queue where the format allows it; seek, volume, shuffle, repeat (off/all/one).
-- A tap of the post-volume PCM goes to the analyser, so visuals match what you hear.
+- The callback pushes a mono mix of what it is playing into a tap (`rtrb`, dropping samples if full), so analysis is in sync with the speakers rather than with the decoder, which runs ~0.75s ahead. While paused it pushes silence, so levels fall to zero. *Decided in M3:* the tap is **pre-volume**, so turning the volume down doesn't shrink the visuals or make the loudness tracker re-adapt.
 
 **Analysis**
-- 2048-point FFT with a Hann window and hop 512, folded into bands (sub-bass, bass, low-mid, mid, high-mid, treble).
-- Spectral-flux onset detection with an adaptive threshold for `onset`.
-- Values are normalised per track with a slow-moving loudness tracker, so quiet tracks still move.
+- 2048-point FFT with a Hann window and hop 512, folded into bands: sub-bass 20–60, bass 60–250, low-mid 250–500, mid 500–2k, high-mid 2k–4k, treble 4k–16k Hz.
+- Spectral-flux onset detection. Flux is the log-magnitude rise averaged **per band, then across bands**, so a kick in a few bass bins counts as much as a cymbal. The adaptive threshold is `2 × median(last 0.5s) + 0.05`. It uses the median, not mean + std, because with a mean the previous beat of a 120 BPM track sits in the window and masks the next one. Peak picking costs one hop (~11ms), and onsets are at least 80ms apart. `onset` is a pulse that jumps to 1 and decays over ~150ms, and `onset_count` counts every one.
+- Values are normalised with slow loudness tracking (`cw_audio::Analyser`), so quiet tracks still move. Each band and the overall level have a ceiling with an instant rise and a 4 dB/s fall, and 30 dB below the ceiling maps to 0..1. A band's ceiling stays within 24 dB of the overall ceiling, so near-empty bands don't amplify noise. Below −70 dB counts as silence. The tracking runs continuously across tracks rather than resetting on each one, which avoids a jump at every track change.
+- Outputs are smoothed with a 12ms attack and a 120ms release.
+- `cargo run -p cw-audio --release --example analyse -- FILE` prints the analysis at 30fps as text meters, for tuning without a speaker.
 
 **System capture (`cw-capture`)**, used when the source is Spotify or Apple Music:
 ```rust
@@ -315,7 +317,7 @@ Each milestone ends with something runnable.
 | M0 | Workspace + TUI shell | `cargo run` opens a 30fps ratatui loop with mode switching and clean exit/panic restore |
 | M1 | Local playback | Plays a folder of files with transport keys, seek, volume, gapless queue |
 | M2 | Static ASCII art | Embedded/folder art rendered with aspect correction, palette (k-means), truecolor + 256 fallback. **Done.** `cw-analysis` (decode, seed, palette) started early for this. Art lookup lives in `cw-audio::cover_art` until `cw-sources` exists. |
-| M3 | Audio analysis | Live bands + onsets shown in the `D` overlay and visibly tracking the music |
+| M3 | Audio analysis | Live bands + onsets shown in the `D` overlay and visibly tracking the music. **Done.** |
 | M4 | Analysis pipeline | MobileCLIP + PCA + features + mask + seed produce a cached recipe JSON; `tools/pca-fit` produces `pca.bin` |
 | M5 | Renderer + layers | All 8 scene layers, constraints (subject protection, seamless loop, change budget), audio modulation |
 | M6 | Library, search, queue, playlists, lyrics | SQLite index, fuzzy search, m3u8 playlists, .lrc/embedded lyrics synced |

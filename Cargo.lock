@@ -443,6 +443,7 @@ dependencies = [
  "cpal",
  "cw-core",
  "lofty",
+ "realfft",
  "rtrb",
  "rubato",
  "symphonia",

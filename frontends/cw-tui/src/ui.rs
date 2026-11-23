@@ -490,6 +490,8 @@ fn draw_debug(f: &mut Frame, app: &App, main: Rect) {
         swatches.push(Span::styled("  ", Style::new().bg(color(c.palette.accent))));
         lines.push(Line::from(swatches));
     }
+    lines.push(Line::from(""));
+    lines.extend(audio_lines(app));
     let w = 32.min(main.width);
     let h = (lines.len() as u16 + 2).min(main.height);
     let area = Rect {
@@ -505,6 +507,42 @@ fn draw_debug(f: &mut Frame, app: &App, main: Rect) {
             .block(panel("debug")),
         area,
     );
+}
+
+/// Width of the analysis bars in the debug overlay.
+const METER_W: usize = 18;
+
+/// One meter row: label, then `#` for the value and `-` for the rest.
+fn meter(label: &str, v: f32, fill: Color) -> Line<'static> {
+    let n = ((v.clamp(0.0, 1.0) * METER_W as f32).round() as usize).min(METER_W);
+    Line::from(vec![
+        Span::raw(format!("{label:<8}")),
+        Span::styled("#".repeat(n), Style::new().fg(fill)),
+        dim("-".repeat(METER_W - n)),
+    ])
+}
+
+/// Live analysis for the debug overlay: six bands, level, and onsets.
+fn audio_lines(app: &App) -> Vec<Line<'static>> {
+    let a = &app.audio;
+    let accent = accent(app);
+    let mut lines: Vec<Line> = cw_core::audio::BAND_NAMES
+        .iter()
+        .zip(a.bands)
+        .map(|(name, v)| meter(name, v, FG))
+        .collect();
+    lines.push(meter("level", a.level, FG));
+    let pulse = (a.onset * METER_W as f32).round() as usize;
+    lines.push(Line::from(vec![
+        Span::raw("onset   "),
+        Span::styled("*".repeat(pulse.min(METER_W)), Style::new().fg(accent)),
+        dim(format!(
+            "{:>w$}",
+            a.onset_count,
+            w = METER_W.saturating_sub(pulse.min(METER_W))
+        )),
+    ]));
+    lines
 }
 
 const KEYS: &[(&str, &str)] = &[
