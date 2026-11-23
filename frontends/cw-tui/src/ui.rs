@@ -1,5 +1,6 @@
 use crate::app::{App, Mode};
-use cw_core::{CellGrid, Rgb};
+use cw_audio::{Status, Track};
+use cw_core::{CellGrid, Repeat, Rgb};
 use cw_render::{DEFAULT_LOOP_FRAMES, IdleStyle};
 use ratatui::{
     Frame,
@@ -7,7 +8,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Clear, Paragraph, Widget, Wrap},
+    widgets::{Block, BorderType, Clear, Padding, Paragraph, Widget, Wrap},
 };
 
 const MIN_WIDTH: u16 = 40;
@@ -17,9 +18,17 @@ const BG: Color = Color::Rgb(14, 15, 18);
 const FG: Color = Color::Rgb(196, 204, 214);
 const DIM: Color = Color::Rgb(98, 104, 114);
 const BORDER: Color = Color::Rgb(48, 52, 60);
+const SELECTED_BG: Color = Color::Rgb(30, 33, 39);
+/// The single accent until covers provide their own palette (M2).
+const ACCENT: Color = Color::Rgb(214, 170, 110);
+const ERROR: Color = Color::Rgb(206, 120, 110);
 
 fn color(c: Rgb) -> Color {
     Color::Rgb(c.0, c.1, c.2)
+}
+
+fn dim(s: impl Into<String>) -> Span<'static> {
+    Span::styled(s.into(), Style::new().fg(DIM))
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -34,24 +43,24 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let [main, hud] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
     match app.mode {
         Mode::Art => draw_art(f, app, main),
-        Mode::Library => draw_library(f, main),
+        Mode::Library => draw_library(f, app, main),
     }
     draw_hud(f, app, hud);
     if app.show_debug {
         draw_debug(f, app, main);
+    }
+    if app.show_help {
+        draw_help(f, main);
     }
 }
 
 fn draw_too_small(f: &mut Frame, area: Rect) {
     let msg = Paragraph::new(vec![
         Line::from("Terminal too small"),
-        Line::from(Span::styled(
-            format!(
-                "need {MIN_WIDTH}x{MIN_HEIGHT}, have {}x{}",
-                area.width, area.height
-            ),
-            Style::new().fg(DIM),
-        )),
+        Line::from(dim(format!(
+            "need {MIN_WIDTH}x{MIN_HEIGHT}, have {}x{}",
+            area.width, area.height
+        ))),
     ])
     .style(Style::new().fg(FG))
     .alignment(Alignment::Center)
@@ -110,70 +119,261 @@ fn panel(title: &str) -> Block<'_> {
         .border_style(Style::new().fg(BORDER))
         .title(Span::styled(format!(" {title} "), Style::new().fg(FG)))
         .style(Style::new().bg(BG).fg(FG))
+        .padding(Padding::new(1, 1, 0, 0))
 }
 
-fn draw_library(f: &mut Frame, area: Rect) {
+fn fmt_time(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
+    }
+}
+
+/// Truncates to `width` columns, ending with "..." when cut.
+fn fit(s: &str, width: usize) -> String {
+    let count = s.chars().count();
+    if count <= width {
+        s.to_string()
+    } else if width <= 3 {
+        s.chars().take(width).collect()
+    } else {
+        let mut out: String = s.chars().take(width - 3).collect();
+        out.push_str("...");
+        out
+    }
+}
+
+fn track_label(t: &Track) -> String {
+    match &t.info.artist {
+        Some(a) => format!("{} - {a}", t.info.title),
+        None => t.info.title.clone(),
+    }
+}
+
+fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).areas(area);
 
-    let empty = Paragraph::new(vec![
-        Line::from("No music yet."),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Library scanning arrives in milestone M6.",
-            Style::new().fg(DIM),
-        )),
-        Line::from(Span::styled(
-            "You will add folders in ~/.config/coverwave/config.toml:",
-            Style::new().fg(DIM),
-        )),
-        Line::from(Span::styled(
-            "  music_dirs = [\"~/Music\"]",
-            Style::new().fg(FG),
-        )),
-    ])
-    .wrap(Wrap { trim: false })
-    .block(panel("Library").padding(ratatui::widgets::Padding::new(2, 2, 1, 1)));
-    f.render_widget(empty, left);
+    let block = panel("Library");
+    let inner = block.inner(left);
+    f.render_widget(block, left);
 
-    let queue = Paragraph::new(Line::from(Span::styled(
-        "Queue is empty.",
-        Style::new().fg(DIM),
-    )))
-    .block(panel("Queue").padding(ratatui::widgets::Padding::new(2, 2, 1, 1)));
-    f.render_widget(queue, right);
+    if app.player.is_none() {
+        let msg = app
+            .audio_error
+            .as_deref()
+            .unwrap_or("Audio is unavailable.");
+        let p = Paragraph::new(vec![
+            Line::from(Span::styled("Cannot play audio", Style::new().fg(ERROR))),
+            Line::from(""),
+            Line::from(dim(msg.to_string())),
+        ])
+        .wrap(Wrap { trim: false });
+        f.render_widget(p, inner);
+        return;
+    }
+    let playing = app.snapshot.as_ref().and_then(|s| s.track);
+
+    if app.track_count() == 0 {
+        let p = Paragraph::new(vec![
+            Line::from("No music loaded."),
+            Line::from(""),
+            Line::from(dim("Start coverwave with files or folders:")),
+            Line::from(Span::styled(
+                "  cw-tui ~/Music/Some\\ Album",
+                Style::new().fg(FG),
+            )),
+            Line::from(""),
+            Line::from(dim("A searchable library arrives in milestone M6.")),
+        ])
+        .wrap(Wrap { trim: false });
+        f.render_widget(p, inner);
+    } else {
+        draw_track_list(f, app, inner, playing);
+    }
+
+    // Queue: the playing track, then what follows in play order.
+    let block = panel("Queue");
+    let inner = block.inner(right);
+    f.render_widget(block, right);
+    let (Some(snap), Some(player)) = (app.snapshot.as_ref(), app.player.as_ref()) else {
+        return;
+    };
+    let tracks = player.tracks();
+    let mut lines = Vec::new();
+    let start = playing
+        .and_then(|t| snap.order.iter().position(|&o| o == t))
+        .unwrap_or(0);
+    let width = inner.width as usize;
+    for (i, &t) in snap
+        .order
+        .iter()
+        .skip(start)
+        .take(inner.height as usize)
+        .enumerate()
+    {
+        let label = fit(&track_label(&tracks[t]), width.saturating_sub(2));
+        if i == 0 && playing.is_some() {
+            lines.push(Line::from(vec![
+                Span::styled("> ", Style::new().fg(ACCENT)),
+                Span::styled(label, Style::new().fg(FG).add_modifier(Modifier::BOLD)),
+            ]));
+        } else {
+            lines.push(Line::from(vec![dim("  "), dim(label)]));
+        }
+    }
+    if let Some(err) = &snap.last_error
+        && (inner.height as usize) > lines.len() + 1
+    {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            fit(err, width),
+            Style::new().fg(ERROR),
+        )));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn draw_track_list(f: &mut Frame, app: &mut App, area: Rect, playing: Option<usize>) {
+    let Some(player) = app.player.as_ref() else {
+        return;
+    };
+    let tracks = player.tracks();
+    let rows = area.height as usize;
+    if rows == 0 {
+        return;
+    }
+    app.library_cursor = app.library_cursor.min(tracks.len() - 1);
+    // Keep the cursor visible, scrolling as little as possible.
+    if app.library_cursor < app.library_offset {
+        app.library_offset = app.library_cursor;
+    } else if app.library_cursor >= app.library_offset + rows {
+        app.library_offset = app.library_cursor + 1 - rows;
+    }
+
+    let width = area.width as usize;
+    let time_w = 7;
+    let lines: Vec<Line> = tracks
+        .iter()
+        .enumerate()
+        .skip(app.library_offset)
+        .take(rows)
+        .map(|(i, t)| {
+            let is_playing = playing == Some(i);
+            let marker = if is_playing {
+                Span::styled("> ", Style::new().fg(ACCENT))
+            } else {
+                Span::raw("  ")
+            };
+            let time = t.info.duration_secs.map(fmt_time).unwrap_or_default();
+            let label_w = width.saturating_sub(2 + time_w);
+            let label = format!("{:<label_w$}", fit(&track_label(t), label_w));
+            let mut style = Style::new().fg(if is_playing { FG } else { DIM });
+            if i == app.library_cursor {
+                style = style.bg(SELECTED_BG).fg(FG);
+            }
+            Line::from(vec![
+                marker,
+                Span::styled(label, style),
+                Span::styled(format!("{time:>time_w$}"), style.fg(DIM)),
+            ])
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_hud(f: &mut Frame, app: &App, area: Rect) {
-    let key = |k: &'static str| Span::styled(k, Style::new().fg(FG).add_modifier(Modifier::BOLD));
-    let label = |l: &'static str| Span::styled(l, Style::new().fg(DIM));
-    let other = match app.mode {
-        Mode::Art => "  library",
-        Mode::Library => "  art",
-    };
-    let hints = Line::from(vec![
-        key("tab"),
-        label(other),
-        label("   "),
-        key("D"),
-        label("  debug"),
-        label("   "),
-        key("q"),
-        label("  quit "),
-    ]);
-    let hints_width = hints.width() as u16;
-    let [left, right] =
-        Layout::horizontal([Constraint::Fill(1), Constraint::Length(hints_width)]).areas(area);
+    f.render_widget(Block::new().style(Style::new().bg(BG)), area);
 
-    f.render_widget(
-        Paragraph::new(Line::from(label(" nothing playing"))).style(Style::new().bg(BG)),
-        left,
-    );
-    f.render_widget(Paragraph::new(hints).style(Style::new().bg(BG)), right);
+    let key = |k: &'static str| Span::styled(k, Style::new().fg(FG).add_modifier(Modifier::BOLD));
+    let snap = app.snapshot.as_ref();
+    let current = snap
+        .zip(app.player.as_ref())
+        .and_then(|(s, p)| s.track.map(|t| (s, &p.tracks()[t])));
+
+    let Some((snap, track)) = current else {
+        let left = match &app.audio_error {
+            Some(e) => Span::styled(format!(" {e}"), Style::new().fg(ERROR)),
+            None => dim(" nothing playing"),
+        };
+        let hints = Line::from(vec![
+            key("tab"),
+            dim(" library   "),
+            key("?"),
+            dim(" keys   "),
+            key("q"),
+            dim(" quit "),
+        ]);
+        let w = hints.width() as u16;
+        let [l, r] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(w)]).areas(area);
+        f.render_widget(Paragraph::new(Line::from(left)), l);
+        f.render_widget(Paragraph::new(hints), r);
+        return;
+    };
+
+    // Right side: progress, time, volume, modes.
+    let pos = snap.position_secs;
+    let time = match snap.duration_secs {
+        Some(d) => format!("{} / {}", fmt_time(pos), fmt_time(d)),
+        None => fmt_time(pos),
+    };
+    let bar_w = (area.width / 5).clamp(10, 40) as usize;
+    let bar = progress_bar(pos, snap.duration_secs, bar_w);
+    let mut right = vec![
+        Span::styled(bar.0, Style::new().fg(ACCENT)),
+        dim(bar.1),
+        Span::raw("  "),
+        Span::styled(time, Style::new().fg(FG)),
+        dim(format!("   vol {:>3}", snap.volume)),
+    ];
+    if snap.shuffle {
+        right.push(Span::styled("  shuffle", Style::new().fg(FG)));
+    }
+    match snap.repeat {
+        Repeat::Off => {}
+        Repeat::All => right.push(Span::styled("  repeat", Style::new().fg(FG))),
+        Repeat::One => right.push(Span::styled("  repeat one", Style::new().fg(FG))),
+    }
+    right.push(Span::raw(" "));
+    let right = Line::from(right);
+    let right_w = right.width() as u16;
+
+    let glyph = match snap.status {
+        Status::Playing => Span::styled(" > ", Style::new().fg(ACCENT)),
+        Status::Paused => Span::styled(" ||", Style::new().fg(FG)),
+        Status::Stopped => dim(" []"),
+    };
+    let [l, r] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(right_w)]).areas(area);
+    let title_w = (l.width as usize).saturating_sub(5);
+    let mut left = vec![glyph, Span::raw(" ")];
+    let title = fit(&track.info.title, title_w);
+    let rest = title_w.saturating_sub(title.chars().count());
+    left.push(Span::styled(
+        title,
+        Style::new().fg(FG).add_modifier(Modifier::BOLD),
+    ));
+    if let Some(artist) = &track.info.artist
+        && rest > 6
+    {
+        left.push(dim(fit(&format!("  {artist}"), rest)));
+    }
+    f.render_widget(Paragraph::new(Line::from(left)), l);
+    f.render_widget(Paragraph::new(right), r);
+}
+
+/// Returns (played, remaining) parts of an ASCII progress bar.
+fn progress_bar(pos: f64, duration: Option<f64>, width: usize) -> (String, String) {
+    let frac = duration
+        .filter(|d| *d > 0.0)
+        .map_or(0.0, |d| (pos / d).clamp(0.0, 1.0));
+    let filled = ((frac * width as f64).round() as usize).min(width);
+    ("=".repeat(filled), "-".repeat(width - filled))
 }
 
 fn draw_debug(f: &mut Frame, app: &App, main: Rect) {
-    let lines = vec![
+    let mut lines = vec![
         Line::from(format!("fps     {:>5.1} / {}", app.measured_fps(), app.fps)),
         Line::from(format!(
             "frame   {:>3} / {}",
@@ -190,7 +390,11 @@ fn draw_debug(f: &mut Frame, app: &App, main: Rect) {
             }
         )),
     ];
-    let w = 26.min(main.width);
+    if let Some(s) = &app.snapshot {
+        lines.push(Line::from(format!("status  {:?}", s.status)));
+        lines.push(Line::from(format!("pos     {:.2}s", s.position_secs)));
+    }
+    let w = 28.min(main.width);
     let h = (lines.len() as u16 + 2).min(main.height);
     let area = Rect {
         x: main.right().saturating_sub(w + 1),
@@ -205,4 +409,76 @@ fn draw_debug(f: &mut Frame, app: &App, main: Rect) {
             .block(panel("debug")),
         area,
     );
+}
+
+const KEYS: &[(&str, &str)] = &[
+    ("space", "play / pause"),
+    ("n  p", "next / previous"),
+    ("<-  ->", "seek 5s (shift: 30s)"),
+    ("+  -", "volume"),
+    ("s", "shuffle"),
+    ("r", "repeat: off, all, one"),
+    ("tab", "art / library"),
+    ("up  down", "move in library (or j k)"),
+    ("enter", "play selected"),
+    ("D", "debug overlay"),
+    ("?", "close this help"),
+    ("q", "quit"),
+];
+
+fn draw_help(f: &mut Frame, main: Rect) {
+    let lines: Vec<Line> = KEYS
+        .iter()
+        .map(|(k, what)| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{k:>9}  "),
+                    Style::new().fg(FG).add_modifier(Modifier::BOLD),
+                ),
+                dim(*what),
+            ])
+        })
+        .collect();
+    let w = 40.min(main.width);
+    let h = (lines.len() as u16 + 2).min(main.height);
+    let area = Rect {
+        x: main.x + (main.width - w) / 2,
+        y: main.y + (main.height - h) / 2,
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).block(panel("keys")), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn time_formatting() {
+        assert_eq!(fmt_time(0.0), "0:00");
+        assert_eq!(fmt_time(65.9), "1:05");
+        assert_eq!(fmt_time(3725.0), "1:02:05");
+    }
+
+    #[test]
+    fn fit_truncates_with_dots() {
+        assert_eq!(fit("hello", 10), "hello");
+        assert_eq!(fit("hello world", 8), "hello...");
+        assert_eq!(fit("hello", 2), "he");
+    }
+
+    #[test]
+    fn progress_bar_widths() {
+        assert_eq!(
+            progress_bar(5.0, Some(10.0), 10),
+            ("=====".into(), "-----".into())
+        );
+        assert_eq!(progress_bar(5.0, None, 4), ("".into(), "----".into()));
+        assert_eq!(
+            progress_bar(50.0, Some(10.0), 4),
+            ("====".into(), "".into())
+        );
+    }
 }

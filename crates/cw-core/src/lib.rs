@@ -3,6 +3,9 @@
 //! Nothing in this crate may depend on a terminal, OS audio, the network or
 //! the filesystem: it is shared with future non-terminal frontends.
 
+pub mod queue;
+pub use queue::{Queue, Repeat};
+
 /// A 24-bit colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Rgb(pub u8, pub u8, pub u8);

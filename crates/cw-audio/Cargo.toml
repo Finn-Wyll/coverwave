@@ -1,0 +1,16 @@
+[package]
+name = "cw-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+audioadapter-buffers = "5.1"
+cpal = "0.18.2"
+cw-core.workspace = true
+lofty = "0.25.5"
+rtrb = "0.4.1"
+rubato = "5.1.0"
+symphonia = { version = "0.6.1", features = ["all"] }
+thiserror = "2.0.21"

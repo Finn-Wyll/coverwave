@@ -3,11 +3,20 @@
 Terminal music player in Rust. It renders the album cover as ASCII, and each cover gets its own audio-reactive motion. The full design, crate layout and milestones are in [PLAN.md](PLAN.md). Read it before making architectural changes, and update it when a decision changes.
 
 ## Status
-M0 done (workspace + TUI shell with an idle scene). Next up: M1 (local playback). Track progress against the milestone table in PLAN.md section 13. Crates are only added when their milestone starts. The workspace currently holds `cw-core`, `cw-render` and `cw-tui`.
+M0 (workspace + TUI shell) and M1 (local playback) done. Next up: M2 (static ASCII album art). Track progress against the milestone table in PLAN.md section 13. Crates are only added when their milestone starts. The workspace currently holds `cw-core` (shared types + play queue), `cw-render`, `cw-audio` (decode/resample/playback) and `cw-tui`.
 
 ## Commands
-- Run: `cargo run -p cw-tui --release` (`tab` switches mode, `D` toggles debug, `q` quits)
+- Run: `cargo run -p cw-tui --release -- <files or folders>` (`?` shows keys in the app)
 - Check: `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
+- Decode check without playing: `cargo run -p cw-audio --release --example probe -- <files or folders>`
+- Test audio: generate with ffmpeg (e.g. `ffmpeg -f lavfi -i "sine=frequency=440:duration=10" -metadata title=X a.flac`). Never commit audio files.
+
+## Audio design notes (cw-audio)
+- Three threads: the cpal callback (ring buffer + atomics only), the decoder thread (owns `Queue` and the open `TrackReader`, decodes ~0.75s ahead), and the UI thread (sends `Command`s, reads a `Snapshot` per frame).
+- Output is always stereo f32 at the device rate. `TrackReader` resamples with rubato and emits exactly `round(frames * ratio)` frames per track, which is what keeps track changes gapless.
+- "What is playing" comes from `Boundary` markers in output-frame time compared with the callback's consumed-frame counter, not from the queue. The decoder is usually already decoding the next track.
+- Seek, skip and jump flush the ring buffer through the callback (`flush` flag) before new audio is pushed.
+- Library dependency versions are newer than most docs and examples online (cpal 0.18, symphonia 0.6, rubato 5). Check the sources in `~/.cargo/registry` before guessing an API.
 
 ## Architecture rules (do not break)
 - Cargo workspace: `crates/cw-*` libraries, `frontends/cw-tui` (the only v1 frontend), `tools/pca-fit`.
