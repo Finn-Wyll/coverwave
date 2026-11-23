@@ -11,6 +11,12 @@ M0 (workspace + TUI shell) and M1 (local playback) done. Next up: M2 (static ASC
 - Decode check without playing: `cargo run -p cw-audio --release --example probe -- <files or folders>`
 - Test audio: generate with ffmpeg (e.g. `ffmpeg -f lavfi -i "sine=frequency=440:duration=10" -metadata title=X a.flac`). Never commit audio files.
 
+## Working without the owner's Mac (cloud or CI)
+- There is usually no audio output device. `Player::new` then returns `AudioError::Device` and the TUI still runs, showing the error. No test opens a device, so `cargo test --workspace` works anywhere.
+- Verify playback logic headlessly with the `probe` example and unit tests. Leave interactive checks (keys, listening for gaps) to the owner, and say so in reports.
+- ffmpeg may not be installed. Tests write their own WAV fixtures, so they don't need it.
+- On Linux, cpal needs ALSA headers to build (`libasound2-dev` and `pkg-config`).
+
 ## Audio design notes (cw-audio)
 - Three threads: the cpal callback (ring buffer + atomics only), the decoder thread (owns `Queue` and the open `TrackReader`, decodes ~0.75s ahead), and the UI thread (sends `Command`s, reads a `Snapshot` per frame).
 - Output is always stereo f32 at the device rate. `TrackReader` resamples with rubato and emits exactly `round(frames * ratio)` frames per track, which is what keeps track changes gapless.
