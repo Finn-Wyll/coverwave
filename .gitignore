@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+.DS_Store
+# downloaded on first run, never committed
+/assets/models/
+*.onnx
