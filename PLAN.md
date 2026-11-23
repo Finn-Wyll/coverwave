@@ -45,9 +45,8 @@ coverwave/
   tools/
     pca-fit/        one-off: fits the fixed 8-dim PCA over a cover corpus
   assets/
-    models/         MobileCLIP ONNX (downloaded on first run, not committed)
     pca.bin         shipped PCA matrix (output of tools/pca-fit)
-    scene_prompts.json
+    scene_prompts.json  scene prompts + their precomputed text embeddings
 ```
 
 ### Key crates
@@ -59,7 +58,7 @@ coverwave/
 | FFT | `rustfft` |
 | Tags / embedded art / lyrics | `lofty` |
 | Images | `image`, `fast_image_resize` |
-| CLIP inference | `ort` (ONNX Runtime) with MobileCLIP-S0/S1 image + text encoders |
+| CLIP inference | `tract-onnx` (pure Rust) with the MobileCLIP-S0 image encoder; text embeddings precomputed |
 | Hashing / seed | `sha2` |
 | Seeded RNG | `rand_chacha` |
 | DB | `rusqlite` (bundled) |
@@ -98,11 +97,12 @@ Threads:
 
 ## 4. Stage 1: Analyse (once per cover, cached)
 
-Cache key: `sha256(cover bytes)`. Cache dir: `~/.cache/coverwave/recipes/<hash>.json` plus `<hash>.features.bin`.
+Cache key: `sha256(cover bytes)`. Cache dir: `~/.cache/coverwave/recipes/<hash>.json` plus `<hash>.clip.bin` (the raw 512-dim embedding, so new prompts or a refitted PCA rebuild recipes without running the model). A cached recipe is reused only if its `version` and `analysis` block (model, prompts version, PCA hash) match the running build.
 
-1. **Scene semantics.** Zero-shot MobileCLIP against `scene_prompts.json`:
-   `snow, lava, very dark scene, forest, ocean, city at night, desert, sky`
-   (extensible, with a version number stored in the cache). Keep the full softmax (temperature 100, as CLIP does) as `scene_weights` and never take an argmax. Text embeddings are computed once and cached.
+**Model (decided in M4).** MobileCLIP-S0's vision encoder, from the ONNX export at `Xenova/mobileclip_s0`, pinned to a revision and SHA-256-checked, 45.5MB fp32. It is downloaded on first run to `~/.cache/coverwave/models/` (`--offline` never downloads; `COVERWAVE_MODEL` points at a local file). It runs with **tract** (pure Rust): no native runtime to ship, so the same code works on the planned ports. It takes ~110ms per cover on a cloud x86 CPU, and its output matches onnxruntime to 1e-6 on identical input. Preprocessing: shortest edge to 256 (antialiased bilinear), centre crop, 0..1, no normalisation. **Licence:** Apple's weights are research/personal-use only (`apple-amlr`). The owner chose this for a personal player. The weights are never committed or redistributed, and a public release would need a permissively licensed model (OpenAI CLIP ViT-B/32 is MIT) plus new prompt embeddings and a PCA refit. Until the model is ready, covers get neutral recipes (no scenes, zero DNA, `ambient` layer) that are not cached, and they are re-analysed once it loads.
+
+1. **Scene semantics.** Zero-shot MobileCLIP against `assets/scene_prompts.json`:
+   `snow, lava, very dark scene, forest, ocean, city at night, desert, sky`, plus three neutral catch-alls `portrait, typography, abstract` (*added in M4*). Each scene's text embedding is the normalised mean over 3 subjects × 3 templates ("an album cover showing {}", "a photo of {}", "artwork of {}"). `pca-fit prompts` computes these once with the text encoder and ships them in the JSON, so the player never runs the text model. Keep the full softmax (temperature 100, as CLIP does) as `scene_weights` and never take an argmax. The neutral scenes have a logit bias of −3: without it, they swallowed real scenes, because nearly every cover has text or a plain area. With it, they win only on portraits, typography-led and abstract covers. Checked by eye on the playlist covers.
 2. **Style fingerprint.** Project the 512-dim image embedding onto the shipped `pca.bin`, which gives 8 floats. Normalise each with the corpus mean/std stored in `pca.bin`, then squash to [-1, 1] with `tanh`. This is the `style_dna`.
 3. **Visual features.**
    - Palette: k-means (k=5, seeded, in Lab colour space) on a 64x64 downsample, sorted by cluster size.
@@ -130,14 +130,14 @@ Analysis budget: under 300ms per new cover on an M-series Mac, and under 5ms on 
 | sky | `cloud_drift` | layer count, drift speed, softness |
 
 ### Rules
-- `layer.intensity = scene_weight`. Drop layers with intensity below 0.10, sort by intensity and keep the top 3.
+- `layer.intensity = scene_weight`. Each scene at or above 0.10 contributes its layers, all at its weight. Layers are then sorted by intensity, ties keep table order, and the top 3 are kept. The neutral scenes' combined weight (if ≥ 0.10) becomes one `ambient` layer, and `ambient` at 0.5 is also the fallback when nothing qualifies. Each scene draws its random parameters from its own ChaCha8 stream, so a scene's look doesn't change when other scenes come and go.
 - **Style DNA → global params** (each mapping is linear and clamped, defined in one table in `cw-analysis/src/mapping.rs`):
   - dna[0] → overall speed multiplier (0.5–1.6)
   - dna[1] → wind direction (angle)
   - dna[2] → particle density
   - dna[3] → flicker rate
   - dna[4] → sway amplitude
-  - dna[5] → charset: `sparse` (` .:`), `standard` (` .:-=+*#%@`), `blocks` (` ░▒▓█`)
+  - dna[5] → charset: `sparse` (` .:`), `standard` (` .:-=+*#%@`), `dense` (a 66-step ASCII ramp). *Changed in M4:* `blocks` (` ░▒▓█`) was dropped to keep the art plain ASCII.
   - dna[6], dna[7] → reserved, kept in the JSON for future tuning
 - **Visual features adjust the result:**
   - `energy = 0.5*saturation + 0.5*edge_density`. Energy scales speed and density.
@@ -167,7 +167,7 @@ Analysis budget: under 300ms per new cover on an M-series Mac, and under 5ms on 
 }
 ```
 
-Users can override a recipe by dropping an edited copy in `~/.config/coverwave/overrides/<hash>.json`. The `R` key in the UI reloads it live.
+Users can override a recipe by dropping an edited copy in `~/.config/coverwave/overrides/<hash>.json`. The `R` key in the UI reloads it live. (`XDG_CACHE_HOME` / `XDG_CONFIG_HOME` move these directories.) The recipe also carries `analysis` (model, prompts version, PCA hash) and `subject_mask` (64 text rows of `0`/`1`, so it can be edited by hand). Directions are screen degrees: 0 = right, 90 = down. The `D` overlay's second page shows the live recipe and where it came from.
 
 ---
 
@@ -280,7 +280,7 @@ trait SystemCapture { fn start(&mut self, sink: Producer<f32>) -> Result<()>; fn
 | `l` | toggle lyrics, `[` `]` shift lyric offset |
 | `S` | switch source (Local / Spotify / Apple Music) |
 | `R` | reload recipe (picks up override edits) |
-| `D` | debug overlay: scene weights, active layers, fps, cells changed % |
+| `D` | debug overlay, cycling: stats (fps, cells changed, cover, live audio) → recipe (source, scenes, layers, globals, DNA) → off |
 | `q` | quit |
 
 **States to handle:** empty library (first-run screen asking for a music folder), missing cover (generated pattern from the palette of the artist name hash), analysis in progress (show static ASCII art immediately, fade motion in when the recipe arrives), capture permission denied (inline message plus how to fix it), Spotify not authenticated, a tiny terminal (below 40x12, show text only).
@@ -298,7 +298,8 @@ fps = 30
 color = "auto"          # auto | truecolor | 256 | mono  (M2: --color flag)
 art_style = "palette"   # palette | truecolor | duotone  (M2: --art-style flag, `c` key)
 cell_aspect = "auto"    # auto (measured) | number  (M2: --cell-aspect flag)
-charset = "auto"        # auto (from style DNA) | sparse | standard | blocks
+charset = "auto"        # auto (from style DNA) | sparse | standard | dense
+offline = false         # never download the analysis model (M4: --offline flag)
 change_budget = 0.15
 [spotify]
 client_id = ""
@@ -318,7 +319,7 @@ Each milestone ends with something runnable.
 | M1 | Local playback | Plays a folder of files with transport keys, seek, volume, gapless queue |
 | M2 | Static ASCII art | Embedded/folder art rendered with aspect correction, palette (k-means), truecolor + 256 fallback. **Done.** `cw-analysis` (decode, seed, palette) started early for this. Art lookup lives in `cw-audio::cover_art` until `cw-sources` exists. |
 | M3 | Audio analysis | Live bands + onsets shown in the `D` overlay and visibly tracking the music. **Done.** |
-| M4 | Analysis pipeline | MobileCLIP + PCA + features + mask + seed produce a cached recipe JSON; `tools/pca-fit` produces `pca.bin` |
+| M4 | Analysis pipeline | MobileCLIP + PCA + features + mask + seed produce a cached recipe JSON; `tools/pca-fit` produces `pca.bin`. **Done.** The shipped `pca.bin` is provisional (see risks). |
 | M5 | Renderer + layers | All 8 scene layers, constraints (subject protection, seamless loop, change budget), audio modulation |
 | M6 | Library, search, queue, playlists, lyrics | SQLite index, fuzzy search, m3u8 playlists, .lrc/embedded lyrics synced |
 | M7 | System capture + Spotify + Apple Music | macOS tap/SCK capture, Spotify PKCE control, Music.app control, source switching |
@@ -342,9 +343,9 @@ M4 and M5 are the heart of the project, so they get the most time. Building M5 a
 
 ## 15. Risks and open questions
 
-- **PCA corpus:** `tools/pca-fit` needs a few thousand covers to fit a meaningful projection. The plan is to use your own library plus an open dataset. It is fitted once and shipped, then never changes, so style DNA stays stable.
-- **MobileCLIP licensing and size:** confirm the model licence allows redistribution, or download it on first run from the official source. It is about 100–200MB.
-- **Scene prompt coverage:** the 8 prompts will miss some covers (abstract art, portraits). The softmax then spreads thin, and every layer could fall below 0.10. Fallback: a subtle `ambient` layer (slow palette breathing) is used when no layer qualifies.
+- **PCA corpus:** `tools/pca-fit` needs a few thousand covers to fit a meaningful projection. The shipped `pca.bin` (version `d66d5b7d`) is **provisional**: it was fitted on the 87 distinct covers of the first 100 tracks of the owner's liked-songs playlist, which is all Spotify's public embed exposes without API credentials. Refit before freezing, either on the owner's library (`pca-fit fit --vision-model … ~/Music`, which reads embedded and folder art) or on the full playlist through the Spotify Web API. A refit changes the PCA hash, so cached recipes rebuild themselves from their cached embeddings.
+- **MobileCLIP licensing:** resolved for personal use, not for distribution (see section 4).
+- **Scene prompt coverage:** portraits, typography and abstract covers used to land on arbitrary scenes. M4 added neutral scenes feeding the `ambient` layer. Remaining misses: dark-background portraits still read as "very dark scene", and some indoor photos as "desert". More prompts or a bigger model would help, and any prompt change bumps `version` in `scene_prompts.json`.
 - **Subject mask quality:** the heuristic masks will be wrong on busy covers. U²-Netp is the planned upgrade.
 - **Cell aspect ratio** varies by font. The config gets an override, and the `D` overlay shows a calibration square.
 - **Spotify Premium** is required for control, and without it the player can only show now-playing. Spotify has also deprecated its audio-features endpoint for new apps, so the plan does not rely on it.

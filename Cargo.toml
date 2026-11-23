@@ -1,6 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["crates/cw-analysis", "crates/cw-audio", "crates/cw-core", "crates/cw-render", "frontends/cw-tui"]
+members = [
+    "crates/cw-analysis",
+    "crates/cw-audio",
+    "crates/cw-core",
+    "crates/cw-render",
+    "frontends/cw-tui",
+    "tools/pca-fit",
+]
 
 [workspace.package]
 version = "0.1.0"

@@ -4,6 +4,8 @@
 
 mod app;
 mod cover;
+mod models;
+mod recipes;
 mod ui;
 
 use anyhow::{Context, Result, bail};
@@ -15,6 +17,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 const DEFAULT_FPS: u32 = 30;
+
+/// The frozen style-DNA projection, fitted by `tools/pca-fit`.
+const PCA_BIN: &[u8] = include_bytes!("../../../assets/pca.bin");
 
 const USAGE: &str = "\
 coverwave: terminal music player
@@ -31,6 +36,8 @@ options:
                       says so, else 256.
   --cell-aspect R     terminal cell width / height (default: measured, else
                       0.5). Raise it if covers look too tall.
+  --offline           never download the cover-analysis model. Without it,
+                      covers get gentle default motion.
   -h, --help          show this help";
 
 /// Splits arguments into settings and input paths.
@@ -41,6 +48,7 @@ fn parse_args(args: &[String]) -> Result<(Settings, Vec<PathBuf>)> {
     };
     let mut inputs = Vec::new();
     let mut it = args.iter();
+    let mut offline = false;
     while let Some(arg) = it.next() {
         let mut value = |name: &str| it.next().with_context(|| format!("{name} needs a value"));
         match arg.as_str() {
@@ -64,11 +72,13 @@ fn parse_args(args: &[String]) -> Result<(Settings, Vec<PathBuf>)> {
                     .with_context(|| format!("--cell-aspect wants a number 0.2..2, got {v:?}"))?;
                 settings.cell_aspect = Some(r);
             }
+            "--offline" => offline = true,
             "--" => inputs.extend(it.by_ref().map(PathBuf::from)),
             s if s.starts_with("--") => bail!("unknown option {s} (see --help)"),
             s => inputs.push(PathBuf::from(s)),
         }
     }
+    settings.offline = offline;
     Ok((settings, inputs))
 }
 
@@ -111,7 +121,15 @@ fn main() -> Result<()> {
     // `ratatui::init` enters the alternate screen + raw mode and installs a
     // panic hook that restores the terminal before the panic message prints.
     let mut terminal = ratatui::init();
-    let mut app = App::new(DEFAULT_FPS, player, audio_error, settings);
+    // The model loads (or downloads, once) in the background; covers get
+    // neutral recipes until it is ready.
+    let recipes = cover::RecipeContext {
+        store: recipes::Store::default_dirs(),
+        scenes: cw_analysis::ScenePrompts::shipped(),
+        pca: cw_analysis::Pca::from_bytes(PCA_BIN).ok(),
+        model: models::start(settings.offline),
+    };
+    let mut app = App::new(DEFAULT_FPS, player, audio_error, settings, recipes);
     app.measure_cell_aspect();
     let result = run(&mut terminal, &mut app);
     ratatui::restore();

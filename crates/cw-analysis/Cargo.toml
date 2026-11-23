@@ -8,6 +8,10 @@ repository.workspace = true
 [dependencies]
 cw-core.workspace = true
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "bmp", "gif"] }
+nalgebra = "0.35"
 rand_chacha = "0.10.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 sha2 = "0.11.1"
 thiserror = "2.0.21"
+tract-onnx = "0.23.10"

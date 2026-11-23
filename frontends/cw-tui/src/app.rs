@@ -1,5 +1,4 @@
-use crate::cover::{CoverLoader, Slot};
-use cw_analysis::Cover;
+use crate::cover::{CoverEntry, CoverLoader, RecipeContext, Slot};
 use cw_audio::{Player, Snapshot};
 use cw_core::{ArtStyle, AudioFrame, CellGrid};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -66,6 +65,8 @@ pub struct Settings {
     pub color_mode: ColorMode,
     /// Fixed cell width/height; `None` measures the terminal.
     pub cell_aspect: Option<f32>,
+    /// Never download the analysis model.
+    pub offline: bool,
 }
 
 impl Default for Settings {
@@ -74,6 +75,7 @@ impl Default for Settings {
             art_style: ArtStyle::default(),
             color_mode: ColorMode::TrueColor,
             cell_aspect: None,
+            offline: false,
         }
     }
 }
@@ -89,11 +91,31 @@ pub struct ArtCache {
     pub grid: CellGrid,
 }
 
+/// What the `D` overlay shows; `D` cycles through them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugPage {
+    Off,
+    /// fps, cover, live audio analysis.
+    Stats,
+    /// The cover's motion recipe.
+    Recipe,
+}
+
+impl DebugPage {
+    pub fn next(self) -> DebugPage {
+        match self {
+            DebugPage::Off => DebugPage::Stats,
+            DebugPage::Stats => DebugPage::Recipe,
+            DebugPage::Recipe => DebugPage::Off,
+        }
+    }
+}
+
 pub struct App {
     pub mode: Mode,
     pub fps: u32,
     pub frame: u32,
-    pub show_debug: bool,
+    pub debug_page: DebugPage,
     pub show_help: bool,
     pub should_quit: bool,
     /// Seed for the idle scene. Fixed so the idle animation is the same every
@@ -124,7 +146,9 @@ pub struct App {
     pub covers: CoverLoader,
     /// The cover shown in Art mode. Kept while the next track's cover loads,
     /// so a track change does not flash the idle scene.
-    pub shown_cover: Option<Arc<Cover>>,
+    pub shown_cover: Option<Arc<CoverEntry>>,
+    /// Whether the model was ready last frame, to notice it becoming ready.
+    model_was_ready: bool,
     pub art_cache: Option<ArtCache>,
     frame_times: VecDeque<Instant>,
 }
@@ -139,12 +163,13 @@ impl App {
         player: Option<Player>,
         audio_error: Option<String>,
         settings: Settings,
+        recipes: RecipeContext,
     ) -> Self {
         App {
             mode: Mode::Art,
             fps,
             frame: 0,
-            show_debug: false,
+            debug_page: DebugPage::Off,
             show_help: false,
             should_quit: false,
             idle_seed: 0x00C0_7E2A_7A7E,
@@ -163,8 +188,9 @@ impl App {
                 .unwrap_or(cw_render::DEFAULT_CELL_ASPECT),
             cell_aspect_measured: false,
             cell_aspect_fixed: settings.cell_aspect.is_some(),
-            covers: CoverLoader::new(),
+            covers: CoverLoader::new(recipes),
             shown_cover: None,
+            model_was_ready: false,
             art_cache: None,
             frame_times: VecDeque::with_capacity(64),
         }
@@ -182,6 +208,12 @@ impl App {
             .as_ref()
             .map_or(AudioFrame::default(), Player::audio_frame);
         self.covers.poll();
+        // Covers analysed before the model was ready get proper recipes now.
+        let ready = self.covers.model().ready().is_some();
+        if ready && !self.model_was_ready {
+            self.covers.invalidate_modelless();
+        }
+        self.model_was_ready = ready;
         self.update_cover();
     }
 
@@ -210,6 +242,13 @@ impl App {
             Some(Slot::Ready(c)) => self.shown_cover = Some(c.clone()),
             Some(Slot::Missing(_)) => self.shown_cover = None,
             Some(Slot::Loading) | None => {} // keep the previous cover a moment
+        }
+    }
+
+    /// Re-reads the shown cover's recipe (picks up override edits).
+    pub fn reload_recipe(&mut self) {
+        if let Some(seed) = self.shown_cover.as_ref().map(|c| c.seed) {
+            self.covers.invalidate(|e| e.cover.seed == seed);
         }
     }
 
@@ -245,7 +284,8 @@ impl App {
             KeyCode::Esc if self.show_help => self.show_help = false,
             KeyCode::Esc => self.should_quit = true,
             KeyCode::Tab => self.mode = self.mode.next(),
-            KeyCode::Char('D') => self.show_debug = !self.show_debug,
+            KeyCode::Char('D') => self.debug_page = self.debug_page.next(),
+            KeyCode::Char('R') => self.reload_recipe(),
             KeyCode::Char('?') => self.show_help = !self.show_help,
             KeyCode::Char('c') => self.art_style = self.art_style.next(),
             _ => self.on_playback_key(key.code, shift),
@@ -326,19 +366,34 @@ mod tests {
     use super::*;
     use ratatui::crossterm::event::KeyEvent;
 
+    fn test_context() -> RecipeContext {
+        RecipeContext {
+            store: crate::recipes::Store {
+                cache: None,
+                overrides: None,
+            },
+            scenes: cw_analysis::ScenePrompts::shipped(),
+            pca: None,
+            model: crate::models::ModelHandle::unavailable("test"),
+        }
+    }
+
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
     #[test]
     fn tab_cycles_modes_and_q_quits() {
-        let mut app = App::new(30, None, None, Settings::default());
+        let mut app = App::new(30, None, None, Settings::default(), test_context());
         app.on_key(press(KeyCode::Tab));
         assert_eq!(app.mode, Mode::Library);
         app.on_key(press(KeyCode::Tab));
         assert_eq!(app.mode, Mode::Art);
         app.on_key(press(KeyCode::Char('D')));
-        assert!(app.show_debug);
+        assert_eq!(app.debug_page, DebugPage::Stats);
+        app.on_key(press(KeyCode::Char('D')));
+        assert_eq!(app.debug_page, DebugPage::Recipe);
+        app.on_key(press(KeyCode::Char('R'))); // nothing shown: no-op
         app.on_key(press(KeyCode::Char('c')));
         assert_eq!(app.art_style, ArtStyle::TrueColor);
         // Playback keys without a player are ignored, not a crash.

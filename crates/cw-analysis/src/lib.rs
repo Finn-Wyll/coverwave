@@ -1,12 +1,25 @@
-//! Cover analysis: image bytes in, a [`Cover`] out.
+//! Cover analysis: image bytes in, a [`Cover`] and a motion [`Recipe`] out
+//! (PLAN.md sections 4 and 5).
 //!
-//! Platform-agnostic: works on bytes, never paths. M2 ships decoding, the
-//! cover seed and the k-means palette; CLIP, PCA, features and the subject
-//! mask arrive in M4 (PLAN.md section 4).
+//! Platform-agnostic: works on bytes, never paths. The CLIP model and PCA
+//! are passed in by the caller, who decides where they come from.
 //!
-//! Determinism: the same bytes always give the same `Cover`. The only
-//! randomness (k-means++ seeding) comes from the cover seed via ChaCha8.
+//! Determinism: the same bytes (and the same model, prompts and PCA) always
+//! give the same result. All randomness comes from the cover seed via
+//! ChaCha8.
 
+pub mod clip;
+pub mod features;
+pub mod mapping;
+pub mod mask;
+pub mod pca;
+pub mod scenes;
+
+pub use clip::{ClipModel, Embedding};
+pub use pca::Pca;
+pub use scenes::ScenePrompts;
+
+use cw_core::recipe::{AnalysisInfo, DNA_DIMS, Recipe};
 use cw_core::{Lab, Palette, Rgb, RgbImage};
 use rand_chacha::ChaCha8Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
@@ -38,29 +51,105 @@ pub struct Cover {
     /// The cover, downscaled so its longest side is at most [`MAX_SIDE`].
     pub image: RgbImage,
     pub palette: Palette,
-    /// First 8 bytes of SHA-256 of the cover bytes, big-endian.
+    /// SHA-256 of the cover bytes: the cache key.
+    pub hash: [u8; 32],
+    /// First 8 bytes of `hash`, big-endian.
     pub seed: u64,
+}
+
+/// The models a recipe is built with. Any of them may be missing: the
+/// recipe then gets neutral scenes and DNA (and should not be cached).
+#[derive(Clone, Copy)]
+pub struct Models<'a> {
+    pub clip: Option<&'a ClipModel>,
+    pub scenes: &'a ScenePrompts,
+    pub pca: Option<&'a Pca>,
+}
+
+impl Models<'_> {
+    /// What a recipe built with these models records in `analysis`.
+    pub fn info(&self, have_embedding: bool) -> AnalysisInfo {
+        AnalysisInfo {
+            model: if have_embedding {
+                clip::MODEL_NAME.to_string()
+            } else {
+                "none".to_string()
+            },
+            prompts_version: self.scenes.version,
+            pca: self.pca.map_or("none".to_string(), Pca::version),
+        }
+    }
+}
+
+/// Embeds the cover (if a model is given) and builds its recipe. Returns the
+/// embedding too, so callers can cache it and rebuild recipes later without
+/// running CLIP again.
+pub fn recipe(
+    cover: &Cover,
+    models: Models<'_>,
+) -> Result<(Recipe, Option<Embedding>), clip::ClipError> {
+    let embedding = match models.clip {
+        Some(m) => Some(m.embed(&cover.image)?),
+        None => None,
+    };
+    let recipe = recipe_with_embedding(cover, embedding.as_deref(), models);
+    Ok((recipe, embedding))
+}
+
+/// Builds a recipe from an already computed embedding (or none).
+pub fn recipe_with_embedding(
+    cover: &Cover,
+    embedding: Option<&[f32]>,
+    models: Models<'_>,
+) -> Recipe {
+    let scene_weights = embedding
+        .map(|e| models.scenes.weights(e))
+        .unwrap_or_default();
+    let style_dna = match (embedding, models.pca) {
+        (Some(e), Some(p)) => p.project(e),
+        _ => [0.0; DNA_DIMS],
+    };
+    mapping::build(mapping::Measured {
+        hash: &cover.hash,
+        seed: cover.seed,
+        palette: &cover.palette,
+        features: features::features(&cover.image),
+        mask: mask::subject_mask(&cover.image),
+        scene_weights,
+        style_dna,
+        analysis: models.info(embedding.is_some()),
+    })
 }
 
 /// Decodes and analyses a cover.
 pub fn analyse(bytes: &[u8]) -> Result<Cover, AnalysisError> {
-    let seed = cover_seed(bytes);
+    let hash: [u8; 32] = Sha256::digest(bytes).into();
+    let seed = seed_from_hash(&hash);
     let full = decode(bytes)?;
     let image = shrink(&full, MAX_SIDE);
     let palette = palette(&image, seed);
     Ok(Cover {
         image,
         palette,
+        hash,
         seed,
     })
 }
 
 /// The cover seed: first 8 bytes of SHA-256, read as a big-endian `u64`.
 pub fn cover_seed(bytes: &[u8]) -> u64 {
-    let hash = Sha256::digest(bytes);
+    seed_from_hash(&Sha256::digest(bytes).into())
+}
+
+fn seed_from_hash(hash: &[u8; 32]) -> u64 {
     let mut first = [0u8; 8];
     first.copy_from_slice(&hash[..8]);
     u64::from_be_bytes(first)
+}
+
+/// Lower-case hex of a cover hash (the cache file name).
+pub fn hash_hex(hash: &[u8; 32]) -> String {
+    hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Decodes JPEG/PNG/WebP/BMP/GIF bytes. Transparency is composited over
@@ -282,6 +371,26 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!((a.image.width, a.image.height), (512, 307));
         assert_eq!(a.seed, cover_seed(&bytes));
+    }
+
+    #[test]
+    fn recipe_without_models_is_neutral_and_deterministic() {
+        let img = split(200, 200, Rgb(200, 40, 40), Rgb(30, 60, 160));
+        let cover = analyse(&png(&img)).unwrap();
+        let scenes = ScenePrompts::shipped();
+        let models = Models {
+            clip: None,
+            scenes: &scenes,
+            pca: None,
+        };
+        let (r, emb) = recipe(&cover, models).unwrap();
+        assert!(emb.is_none());
+        assert_eq!(r.analysis.model, "none");
+        assert!(r.scene_weights.is_empty());
+        assert_eq!(r.style_dna, [0.0; DNA_DIMS]);
+        assert_eq!(r.layers[0].kind(), "ambient");
+        assert_eq!(r.cover_hash, hash_hex(&cover.hash));
+        assert_eq!(r, recipe(&cover, models).unwrap().0);
     }
 
     #[test]

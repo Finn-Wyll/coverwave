@@ -3,19 +3,22 @@
 Terminal music player in Rust. It renders the album cover as ASCII, and each cover gets its own audio-reactive motion. The full design, crate layout and milestones are in [PLAN.md](PLAN.md). Read it before making architectural changes, and update it when a decision changes.
 
 ## Status
-M0 (workspace + TUI shell), M1 (local playback), M2 (static ASCII album art) and M3 (audio analysis) done. Next up: M4 (analysis pipeline: MobileCLIP + PCA + features + subject mask -> recipe JSON). PLAN.md suggests building M5 against a hand-written recipe first. Track progress against the milestone table in PLAN.md section 13. Crates are only added when their milestone starts. The workspace currently holds `cw-core` (shared types, colour maths, play queue), `cw-analysis` (cover decode, seed, k-means palette), `cw-render` (idle scene + static base art), `cw-audio` (decode/resample/playback, cover-art lookup, FFT/onset analyser) and `cw-tui`.
+M0 (workspace + TUI shell), M1 (local playback), M2 (static ASCII album art), M3 (audio analysis) and M4 (cover analysis -> recipe JSON) done. Next up: M5 (renderer + effect layers driven by the recipe). The shipped `assets/pca.bin` is provisional (87 covers); see PLAN.md section 15. Track progress against the milestone table in PLAN.md section 13. Crates are only added when their milestone starts. The workspace currently holds `cw-core` (shared types, colour maths, play queue, `Recipe`), `cw-analysis` (cover decode, seed, palette, MobileCLIP via tract, features, subject mask, PCA, recipe mapping), `cw-render` (idle scene + static base art), `cw-audio` (decode/resample/playback, cover-art lookup, FFT/onset analyser), `cw-tui` (also downloads the model and caches recipes) and `tools/pca-fit`.
 
 ## Commands
 - Run: `cargo run -p cw-tui --release -- <files or folders>` (`?` shows keys in the app)
 - Check: `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
 - Decode check without playing: `cargo run -p cw-audio --release --example probe -- <files or folders>`
 - Analysis trace without playing: `cargo run -p cw-audio --release --example analyse -- <file>` (bands, level and onsets at 30fps as text)
+- Recipe for one image: `cargo run -p cw-analysis --release --example recipe -- <vision_model.onnx> <image> [assets/pca.bin]`
+- Cover-analysis tooling (`tools/pca-fit`): `prompts` (re-embed `assets/scene_prompts.json` with the text model), `fit` (refit `assets/pca.bin` from image/music folders), `scenes` (print scene weights per image). Model files come from `https://huggingface.co/Xenova/mobileclip_s0` (`onnx/vision_model.onnx`, `onnx/text_model.onnx`, `tokenizer.json`). Keep them outside the repo.
 - Test audio: generate with ffmpeg (e.g. `ffmpeg -f lavfi -i "sine=frequency=440:duration=10" -metadata title=X a.flac`). Never commit audio files.
 
 ## Working without the owner's Mac (cloud or CI)
 - There is usually no audio output device. `Player::new` then returns `AudioError::Device` and the TUI still runs, showing the error. No test opens a device, so `cargo test --workspace` works anywhere.
 - Verify playback logic headlessly with the `probe` example and unit tests. Leave interactive checks (keys, listening for gaps) to the owner, and say so in reports.
 - ffmpeg may not be installed. Tests write their own WAV fixtures, so they don't need it.
+- No test needs the CLIP model or the network. The app downloads it on first run from `huggingface.co`, which redirects to `us.aws.cdn.hf.co` (both must be allowed). `--offline` skips the download, and `XDG_CACHE_HOME`/`XDG_CONFIG_HOME` point the model, recipe cache and overrides elsewhere. If you set `XDG_CONFIG_HOME` while using PulseAudio, copy `~/.config/pulse` into it or audio fails to connect.
 - On Linux, cpal needs ALSA headers to build (`libasound2-dev` and `pkg-config`).
 - To drive the real app headlessly (screenshots, track changes), give it a real-time fake device: install `pulseaudio libasound2-plugins`, then run `pulseaudio -D`, `pactl load-module module-null-sink sink_name=nul` and `pactl set-default-sink nul`, with `~/.asoundrc` set to `pcm.!default { type pulse }`. ALSA's own `null` device has no clock, so tracks "finish" instantly.
 
@@ -43,7 +46,7 @@ M0 (workspace + TUI shell), M1 (local playback), M2 (static ASCII album art) and
 - Rust stable, edition 2024, and shared metadata/deps in the root `Cargo.toml` (`[workspace.package]`, `[workspace.dependencies]`). Run `cargo fmt` and `cargo clippy --workspace -- -D warnings` before committing.
 - Tests: `cargo test --workspace`. Renderer changes need determinism, loop-seam and change-budget tests, plus `insta` golden frames. A perf bench (`criterion`) keeps `render()` under 4ms at 240x70.
 - Errors: `thiserror` in libraries, `anyhow` in the frontend and tools.
-- Model files (`*.onnx`, `assets/models/`) are downloaded on first run and never committed.
+- Model files (`*.onnx`, `assets/models/`) are downloaded on first run and never committed. MobileCLIP's weights are research/personal-use licensed: never redistribute them.
 - Do not commit secrets. Spotify tokens live in the OS keychain, and the config holds only the public client ID.
 
 ## User preferences

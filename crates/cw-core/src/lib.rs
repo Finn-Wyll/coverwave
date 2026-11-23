@@ -7,10 +7,12 @@ pub mod art;
 pub mod audio;
 pub mod color;
 pub mod queue;
+pub mod recipe;
 pub use art::{ArtStyle, Palette, RgbImage};
 pub use audio::{AudioFrame, BAND_COUNT};
 pub use color::{Lab, ansi256};
 pub use queue::{Queue, Repeat};
+pub use recipe::{Layer, Recipe};
 
 /// A 24-bit colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

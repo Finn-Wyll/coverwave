@@ -1,43 +1,75 @@
 //! Loads and analyses cover art off the UI thread.
 //!
-//! Each request reads the track's art (embedded or folder image) and runs
-//! `cw_analysis::analyse` on a short-lived worker thread. Results come back
-//! over a channel and are polled once per frame. Covers with the same seed
-//! (an album's tracks usually share one image) are shared via `Arc`.
+//! Each request reads the track's art (embedded or folder image), runs
+//! `cw_analysis::analyse`, and loads the cover's recipe (override, cache or
+//! fresh analysis; see `recipes`) on a short-lived worker thread. Results
+//! come back over a channel and are polled once per frame. Covers with the
+//! same seed (an album's tracks usually share one image) share one entry.
 
-use cw_analysis::Cover;
+use crate::models::ModelHandle;
+use crate::recipes::{Loaded, Source, Store};
+use cw_analysis::{Cover, Pca, ScenePrompts};
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+/// A cover and its recipe.
+#[derive(Debug)]
+pub struct CoverEntry {
+    pub cover: Cover,
+    pub recipe: Loaded,
+}
+
+impl Deref for CoverEntry {
+    type Target = Cover;
+    fn deref(&self) -> &Cover {
+        &self.cover
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Slot {
     Loading,
-    Ready(Arc<Cover>),
+    Ready(Arc<CoverEntry>),
     /// No art found, or it could not be decoded. The reason shows in the
     /// debug overlay.
     Missing(String),
 }
 
-type Message = (usize, Result<Cover, String>);
+/// What workers need to build recipes. Shared, read-only.
+pub struct RecipeContext {
+    pub store: Store,
+    pub scenes: ScenePrompts,
+    pub pca: Option<Pca>,
+    pub model: ModelHandle,
+}
+
+type Message = (usize, Result<CoverEntry, String>);
 
 pub struct CoverLoader {
     slots: HashMap<usize, Slot>,
-    by_seed: HashMap<u64, Arc<Cover>>,
+    by_seed: HashMap<u64, Arc<CoverEntry>>,
+    ctx: Arc<RecipeContext>,
     tx: Sender<Message>,
     rx: Receiver<Message>,
 }
 
 impl CoverLoader {
-    pub fn new() -> Self {
+    pub fn new(ctx: RecipeContext) -> Self {
         let (tx, rx) = channel();
         CoverLoader {
             slots: HashMap::new(),
             by_seed: HashMap::new(),
+            ctx: Arc::new(ctx),
             tx,
             rx,
         }
+    }
+
+    pub fn model(&self) -> &ModelHandle {
+        &self.ctx.model
     }
 
     /// Starts loading the cover for track `index` unless it is already
@@ -48,13 +80,20 @@ impl CoverLoader {
         }
         self.slots.insert(index, Slot::Loading);
         let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
         let spawned = std::thread::Builder::new()
             .name("cw-cover".into())
             .spawn(move || {
-                let result = match cw_audio::cover_art(&path) {
-                    None => Err("no cover art".to_string()),
-                    Some(bytes) => cw_analysis::analyse(&bytes).map_err(|e| e.to_string()),
-                };
+                let result = cw_audio::cover_art(&path)
+                    .ok_or_else(|| "no cover art".to_string())
+                    .and_then(|bytes| cw_analysis::analyse(&bytes).map_err(|e| e.to_string()))
+                    .map(|cover| {
+                        let clip = ctx.model.ready();
+                        let recipe =
+                            ctx.store
+                                .load(&cover, clip.as_deref(), &ctx.scenes, ctx.pca.as_ref());
+                        CoverEntry { cover, recipe }
+                    });
                 // The receiver only disappears when the app is quitting.
                 let _ = tx.send((index, result));
             });
@@ -68,11 +107,11 @@ impl CoverLoader {
     pub fn poll(&mut self) {
         while let Ok((index, result)) = self.rx.try_recv() {
             let slot = match result {
-                Ok(cover) => {
+                Ok(entry) => {
                     let shared = self
                         .by_seed
-                        .entry(cover.seed)
-                        .or_insert_with(|| Arc::new(cover))
+                        .entry(entry.cover.seed)
+                        .or_insert_with(|| Arc::new(entry))
                         .clone();
                     Slot::Ready(shared)
                 }
@@ -84,5 +123,18 @@ impl CoverLoader {
 
     pub fn get(&self, index: usize) -> Option<&Slot> {
         self.slots.get(&index)
+    }
+
+    /// Forgets finished entries matching `pred`, so the next request loads
+    /// them again. Entries still loading are left alone.
+    pub fn invalidate(&mut self, pred: impl Fn(&CoverEntry) -> bool) {
+        self.slots
+            .retain(|_, s| !matches!(s, Slot::Ready(e) if pred(e)));
+        self.by_seed.retain(|_, e| !pred(e));
+    }
+
+    /// Forgets covers whose recipe was built before the model was ready.
+    pub fn invalidate_modelless(&mut self) {
+        self.invalidate(|e| e.recipe.source == Source::NoModel);
     }
 }

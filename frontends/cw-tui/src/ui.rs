@@ -1,4 +1,4 @@
-use crate::app::{App, ArtCache, ColorMode, Mode};
+use crate::app::{App, ArtCache, ColorMode, DebugPage, Mode};
 use crate::cover::Slot;
 use cw_audio::{Status, Track};
 use cw_core::{CellGrid, Repeat, Rgb, ansi256};
@@ -55,8 +55,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::Library => draw_library(f, app, main),
     }
     draw_hud(f, app, hud);
-    if app.show_debug {
-        draw_debug(f, app, main);
+    match app.debug_page {
+        DebugPage::Off => {}
+        DebugPage::Stats => draw_debug(f, app, main),
+        DebugPage::Recipe => draw_recipe(f, app, main),
     }
     if app.show_help {
         draw_help(f, main);
@@ -492,7 +494,12 @@ fn draw_debug(f: &mut Frame, app: &App, main: Rect) {
     }
     lines.push(Line::from(""));
     lines.extend(audio_lines(app));
-    let w = 32.min(main.width);
+    draw_overlay(f, main, "debug", lines);
+}
+
+/// A titled panel in the top-right corner of `main`.
+fn draw_overlay(f: &mut Frame, main: Rect, title: &str, lines: Vec<Line>) {
+    let w = OVERLAY_W.min(main.width);
     let h = (lines.len() as u16 + 2).min(main.height);
     let area = Rect {
         x: main.right().saturating_sub(w + 1),
@@ -504,9 +511,85 @@ fn draw_debug(f: &mut Frame, app: &App, main: Rect) {
     f.render_widget(
         Paragraph::new(lines)
             .style(Style::new().fg(FG))
-            .block(panel("debug")),
+            .block(panel(title)),
         area,
     );
+}
+
+const OVERLAY_W: u16 = 32;
+/// Text width inside an overlay (borders and padding take 4).
+const OVERLAY_TEXT_W: usize = OVERLAY_W as usize - 4;
+
+/// The second `D` page: the shown cover's motion recipe.
+fn draw_recipe(f: &mut Frame, app: &App, main: Rect) {
+    let mut lines = vec![Line::from(format!(
+        "model   {}",
+        fit(&app.covers.model().status().describe(), OVERLAY_TEXT_W - 8)
+    ))];
+    let Some(entry) = &app.shown_cover else {
+        lines.push(Line::from(dim("no cover shown")));
+        draw_overlay(f, main, "recipe", lines);
+        return;
+    };
+    let loaded = &entry.recipe;
+    let r = &loaded.recipe;
+    lines.push(Line::from(format!("source  {}", loaded.source.name())));
+    if let Some(w) = &loaded.warning {
+        lines.push(Line::from(Span::styled(
+            fit(w, OVERLAY_TEXT_W),
+            Style::new().fg(ERROR),
+        )));
+    }
+    lines.push(Line::from(dim(fit(&r.cover_hash, OVERLAY_TEXT_W))));
+
+    lines.push(Line::from(""));
+    let mut scenes: Vec<(&String, &f32)> = r.scene_weights.iter().collect();
+    scenes.sort_by(|a, b| b.1.total_cmp(a.1));
+    if scenes.is_empty() {
+        lines.push(Line::from(dim("scenes  (none)")));
+    }
+    for (name, w) in scenes.iter().take(3) {
+        lines.push(meter(&fit(name, 7), **w, FG));
+    }
+
+    lines.push(Line::from(""));
+    for l in &r.layers {
+        lines.push(meter(&fit(l.kind(), 7), l.intensity(), accent(app)));
+    }
+
+    lines.push(Line::from(""));
+    let g = &r.global;
+    lines.push(Line::from(format!(
+        "speed   {:.2}  sway {:.2}",
+        g.speed, g.sway
+    )));
+    lines.push(Line::from(format!(
+        "density {:.2}  wind {:.0}",
+        g.density, g.wind_deg
+    )));
+    lines.push(Line::from(
+        format!("chars   {:?}", g.charset).to_lowercase(),
+    ));
+    lines.push(Line::from(format!(
+        "energy  {:.2}  mask {:.0}%",
+        r.features.energy,
+        100.0 * r.subject_mask.coverage()
+    )));
+    for half in r.style_dna.chunks(4) {
+        let vals: Vec<String> = half.iter().map(|d| format!("{d:+.1}")).collect();
+        let label = if lines
+            .last()
+            .is_some_and(|l| l.to_string().starts_with("dna"))
+        {
+            "       "
+        } else {
+            "dna    "
+        };
+        lines.push(Line::from(format!("{label} {}", vals.join(" "))));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(dim("R reloads (overrides too)")));
+    draw_overlay(f, main, "recipe", lines);
 }
 
 /// Width of the analysis bars in the debug overlay.
@@ -556,7 +639,8 @@ const KEYS: &[(&str, &str)] = &[
     ("c", "cover style (palette, true, duo)"),
     ("up  down", "move in library (or j k)"),
     ("enter", "play selected"),
-    ("D", "debug overlay"),
+    ("D", "debug overlay: stats, recipe, off"),
+    ("R", "reload the cover's recipe"),
     ("?", "close this help"),
     ("q", "quit"),
 ];
