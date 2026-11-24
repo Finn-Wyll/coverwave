@@ -52,4 +52,9 @@ xcodebuild -create-xcframework \
   -library "$root/target/aarch64-apple-ios-sim/$profile/libcw_ffi.a" -headers "$headers" \
   -output "$out"
 
+if [ ! -f "$here/Coverwave/Resources/BeatThis-small.onnx" ]; then
+  echo "Note: the beat tracker is missing, so covers fall back to genre tempos."
+  echo "      Make it with ios/tools/export_beat_model.py (see the comment at its top)."
+fi
+
 echo "Core ready. Next: cd ios && xcodegen generate && open Coverwave.xcodeproj"

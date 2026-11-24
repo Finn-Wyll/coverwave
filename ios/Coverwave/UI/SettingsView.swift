@@ -10,28 +10,41 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 Section {
+                    Picker("Scheme", selection: $settings.gestures) {
+                        ForEach(GestureScheme.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    GuideTable(scheme: settings.gestures)
+                        .padding(.vertical, 4)
+                    Button("Show Guide on the Cover") {
+                        settings.seenGestureGuide = false
+                        dismiss()
+                    }
+                } header: {
+                    Text("Gestures")
+                }
+
+                Section {
                     Picker("Motion", selection: $settings.motion) {
                         ForEach(AppSettings.Motion.allCases) { Text($0.label).tag($0) }
                     }
                     Picker("Art", selection: $settings.artMode) {
                         ForEach(ArtMode.allCases) { Text($0.label).tag($0) }
                     }
+                    Picker("Detail", selection: $settings.artDetail) {
+                        ForEach(ArtDetail.allCases) { Text($0.label).tag($0) }
+                    }
                 } footer: {
-                    Text("Automatic motion pauses when Reduce Motion is on.")
+                    Text("Finer detail draws the cover with smaller, more numerous characters. Automatic motion pauses when Reduce Motion is on.")
                 }
 
                 Section {
-                    Toggle(
-                        "Listen with Microphone",
-                        isOn: Binding(
-                            get: { model.micActive },
-                            set: { on in Task { await model.setMicrophone(on) } }))
-                    Toggle("Look Up Tempo Online", isOn: $settings.tempoLookup)
+                    Toggle("Measure Each Song's Rhythm", isOn: $settings.tempoLookup)
                 } header: {
                     Text("Rhythm")
                 } footer: {
                     Text(
-                        "iOS keeps other apps' audio private, so covers move to the song's tempo. The microphone lets them follow the actual sound; it is analysed on this iPhone and never recorded. Tempo lookup sends the song's title and artist to Deezer."
+                        "iOS keeps other apps' audio private, so coverwave measures each song's rhythm from its 30-second Deezer preview with a beat-tracking model on this iPhone, then plays that groove in time with the song. Deezer's previews start 48 seconds in, which is how the beat lines up with the song. Finding the preview sends the song's title and artist to Deezer."
                     )
                 }
 
@@ -54,13 +67,22 @@ struct SettingsView: View {
                     )
                 }
 
-                Section("Sources") {
+                Section {
                     ForEach(SourceKind.allCases) { kind in
-                        sourceRow(kind)
+                        Button {
+                            model.choose(kind)
+                        } label: {
+                            sourceRow(kind)
+                        }
+                        .disabled(kind == .spotify && !model.spotify.isConfigured)
                     }
                     if model.spotify.isConfigured, model.spotify.status != .disconnected {
                         Button("Log Out of Spotify", role: .destructive) { model.spotify.logOut() }
                     }
+                } header: {
+                    Text("Sources")
+                } footer: {
+                    Text("Tap a source to follow it.")
                 }
             }
             .navigationTitle("Settings")
@@ -71,7 +93,10 @@ struct SettingsView: View {
                 }
             }
             .scrollContentBackground(.hidden)
+            .background(Theme.page)
         }
+        .fontDesign(.monospaced)
+        .tint(model.accent)
     }
 
     @ViewBuilder private var modelRow: some View {
@@ -106,7 +131,8 @@ struct SettingsView: View {
         return LabeledContent {
             Text(status).lineLimit(2).multilineTextAlignment(.trailing)
         } label: {
-            Label(kind.name, systemImage: kind.symbol)
+            Text(model.activeKind == kind ? "> \(kind.name)" : "  \(kind.name)")
+                .foregroundStyle(Term.ink)
         }
     }
 

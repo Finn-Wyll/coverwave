@@ -801,6 +801,7 @@ dependencies = [
  "image",
  "nalgebra",
  "rand_chacha 0.10.0",
+ "realfft",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -852,7 +853,6 @@ name = "cw-ffi"
 version = "0.1.0"
 dependencies = [
  "cw-analysis",
- "cw-audio",
  "cw-core",
  "cw-render",
  "image",

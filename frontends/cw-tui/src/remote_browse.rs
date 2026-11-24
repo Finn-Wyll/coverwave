@@ -187,6 +187,32 @@ impl RemoteBrowser {
         }
     }
 
+    pub fn at_root(&self) -> bool {
+        self.stack.len() == 1
+    }
+
+    /// `enter` while typing at the top level: search the whole catalogue
+    /// for the typed text instead of filtering.
+    pub fn search(&mut self) -> RemoteAction {
+        let query = self.filter.take().unwrap_or_default().trim().to_string();
+        if query.is_empty() {
+            return RemoteAction::None;
+        }
+        let path = LibraryPath::Search { query };
+        // Searches are fresh each time.
+        self.cache.retain(|(p, _, _)| *p != path);
+        self.error = None;
+        self.stack.push(Level {
+            path,
+            cursor: 0,
+            offset: 0,
+        });
+        match self.wanted() {
+            Some(p) => RemoteAction::Browse(p),
+            None => RemoteAction::None,
+        }
+    }
+
     /// `backspace`/`esc`: clear the filter, else go up a level. Returns
     /// false at the root with no filter (the key is not used).
     pub fn back(&mut self) -> bool {
@@ -307,6 +333,27 @@ mod tests {
         assert_eq!(titles, ["Nude"]);
         assert!(b.back());
         assert_eq!(b.rows().len(), 2);
+    }
+
+    #[test]
+    fn enter_at_the_root_searches_the_catalogue() {
+        let mut b = RemoteBrowser::new();
+        arrive(&mut b, LibraryPath::Root, vec![]);
+        b.start_filter();
+        for c in "kid a".chars() {
+            b.type_char(c);
+        }
+        let path = LibraryPath::Search {
+            query: "kid a".into(),
+        };
+        assert_eq!(b.search(), RemoteAction::Browse(path.clone()));
+        assert_eq!(b.path(), &path);
+        assert_eq!(b.filter, None);
+        assert!(b.back());
+        assert!(b.at_root());
+        // An empty search does nothing.
+        b.start_filter();
+        assert_eq!(b.search(), RemoteAction::None);
     }
 
     #[test]

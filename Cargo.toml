@@ -28,5 +28,14 @@ cw-audio = { path = "crates/cw-audio" }
 cw-capture = { path = "crates/cw-capture" }
 cw-sources = { path = "crates/cw-sources" }
 
+# Debug builds keep line numbers for this project's code (panics and test
+# failures still point at the right line) and no debug info for
+# dependencies. Full debug info made target/debug about 12 GB, mostly tract.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 lto = "thin"

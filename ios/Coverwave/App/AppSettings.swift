@@ -27,10 +27,6 @@ final class AppSettings {
         didSet { defaults.set(motion.rawValue, forKey: "motion") }
     }
 
-    var listenWithMicrophone: Bool {
-        didSet { defaults.set(listenWithMicrophone, forKey: "listenWithMicrophone") }
-    }
-
     var tempoLookup: Bool {
         didSet { defaults.set(tempoLookup, forKey: "tempoLookup") }
     }
@@ -39,17 +35,38 @@ final class AppSettings {
         didSet { defaults.set(artMode.key, forKey: "artMode") }
     }
 
+    /// How many characters the art is made of.
+    var artDetail: ArtDetail {
+        didSet { defaults.set(artDetail.rawValue, forKey: "artDetail") }
+    }
+
+    /// How touches on the art control playback.
+    var gestures: GestureScheme {
+        didSet { defaults.set(gestures.rawValue, forKey: "gestures") }
+    }
+
+    /// The gesture guide has been shown once.
+    var seenGestureGuide: Bool {
+        didSet { defaults.set(seenGestureGuide, forKey: "seenGestureGuide") }
+    }
+
     /// The source to reconnect to on launch.
     var lastSource: SourceKind? {
         didSet { defaults.set(lastSource?.rawValue, forKey: "lastSource") }
     }
 
     init() {
+        // A local copy: reading `self.defaults` in a closure before every
+        // stored property is set does not compile.
+        let defaults = UserDefaults.standard
         motion = Motion(rawValue: defaults.string(forKey: "motion") ?? "") ?? .automatic
-        listenWithMicrophone = defaults.bool(forKey: "listenWithMicrophone")
         tempoLookup = defaults.object(forKey: "tempoLookup") as? Bool ?? true
-        artMode = ArtMode.allCases.first { $0.key == defaults.string(forKey: "artMode") } ?? .palette
+        let savedArtMode = defaults.string(forKey: "artMode")
+        artMode = ArtMode.allCases.first { $0.key == savedArtMode } ?? .palette
         lastSource = defaults.string(forKey: "lastSource").flatMap(SourceKind.init(rawValue:))
+        artDetail = ArtDetail(rawValue: defaults.string(forKey: "artDetail") ?? "") ?? .fine
+        gestures = GestureScheme(rawValue: defaults.string(forKey: "gestures") ?? "") ?? .direct
+        seenGestureGuide = defaults.bool(forKey: "seenGestureGuide")
     }
 
     func animates(reduceMotion: Bool) -> Bool {

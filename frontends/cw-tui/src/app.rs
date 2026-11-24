@@ -902,7 +902,8 @@ impl App {
                 KeyCode::Up => b.move_by(-1),
                 KeyCode::Down => b.move_by(1),
                 KeyCode::Enter => {
-                    let a = b.enter();
+                    // At the top, typed text searches the whole catalogue.
+                    let a = if b.at_root() { b.search() } else { b.enter() };
                     self.remote_action(a);
                 }
                 KeyCode::Char(c) => b.type_char(c),

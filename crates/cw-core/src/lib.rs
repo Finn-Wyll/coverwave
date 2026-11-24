@@ -9,12 +9,14 @@ pub mod beat;
 pub mod color;
 pub mod queue;
 pub mod recipe;
+pub mod rhythm;
 pub use art::{ArtStyle, Palette, RgbImage};
 pub use audio::{AudioFrame, BAND_COUNT};
 pub use beat::{BeatClock, BeatPattern};
 pub use color::{Lab, ansi256};
 pub use queue::{Queue, Repeat};
 pub use recipe::{Layer, Recipe};
+pub use rhythm::RhythmMap;
 
 /// A 24-bit colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

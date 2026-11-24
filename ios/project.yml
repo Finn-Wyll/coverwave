@@ -30,6 +30,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(COVERWAVE_BUNDLE_ID)
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
         ENABLE_USER_SCRIPT_SANDBOXING: YES
@@ -50,7 +51,6 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         ITSAppUsesNonExemptEncryption: false
         NSAppleMusicUsageDescription: coverwave shows the cover of what Music is playing and lets you control it.
-        NSMicrophoneUsageDescription: If you turn on Listen with Microphone, coverwave hears the music so covers move with it. Audio is analysed on this iPhone and never recorded or sent.
         LSApplicationQueriesSchemes:
           - spotify
         CFBundleURLTypes:

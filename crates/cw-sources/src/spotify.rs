@@ -32,6 +32,8 @@ user-read-currently-playing playlist-read-private playlist-read-collaborative us
 const PAGE: usize = 50;
 /// At most this many rows per listing (keeps a huge library responsive).
 const MAX_ROWS: usize = 1000;
+/// Results per kind in a catalogue search (Development Mode allows 10).
+const SEARCH_LIMIT: usize = 10;
 /// At most this many tracks in one "play these" request.
 const MAX_URIS: usize = 100;
 /// How long to wait for a Spotify app we launched to appear as a device.
@@ -623,6 +625,54 @@ impl Spotify {
         }
     }
 
+    /// The whole catalogue: songs first (each plays on its own), then
+    /// albums (open to their tracks) and playlists (play whole).
+    fn search(&mut self, query: &str) -> Result<Vec<LibraryItem>, SourceError> {
+        let v = self.get_json(&format!(
+            "/search?q={}&type=track,album,playlist&limit={SEARCH_LIMIT}",
+            encode(query)
+        ))?;
+        let list = |key: &str| v[key]["items"].as_array().cloned().unwrap_or_default();
+        let mut rows: Vec<LibraryItem> = list("tracks")
+            .iter()
+            .filter_map(track_row)
+            .map(|(uri, mut item)| {
+                item.action = ItemAction::Play(PlayRequest {
+                    uris: vec![uri],
+                    ..Default::default()
+                });
+                item
+            })
+            .collect();
+        rows.extend(list("albums").iter().filter_map(|a| {
+            let id = a["id"].as_str()?.to_string();
+            let uri = a["uri"].as_str()?.to_string();
+            let name = a["name"].as_str().unwrap_or("Untitled").to_string();
+            Some(LibraryItem {
+                title: name.clone(),
+                subtitle: artists(a).map(|s| format!("album, {s}")),
+                count: a["total_tracks"].as_u64().map(|t| t as u32),
+                duration_secs: None,
+                action: ItemAction::Open(LibraryPath::Album { id, name, uri }),
+            })
+        }));
+        // Playlist results can be null placeholders.
+        rows.extend(list("playlists").iter().filter_map(|p| {
+            let uri = p["uri"].as_str()?.to_string();
+            Some(LibraryItem {
+                title: p["name"].as_str().unwrap_or("Untitled").to_string(),
+                subtitle: Some("playlist".into()),
+                count: None,
+                duration_secs: None,
+                action: ItemAction::Play(PlayRequest {
+                    context_uri: Some(uri),
+                    ..Default::default()
+                }),
+            })
+        }));
+        Ok(rows)
+    }
+
     /// The logged-in user's id (cached), to tell owned playlists apart.
     fn user_id(&mut self) -> Result<String, SourceError> {
         if let Some(id) = &self.user {
@@ -938,6 +988,7 @@ impl Backend for Spotify {
                     })
                 })
                 .collect()),
+            LibraryPath::Search { query } => self.search(query),
             LibraryPath::Album { id, uri, .. } => {
                 let tracks = self
                     .get_all(&format!("/albums/{}/tracks", encode(id)))?
@@ -1332,6 +1383,46 @@ mod tests {
             })
         );
         assert_eq!(log.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn searches_the_catalogue_for_songs_albums_and_playlists() {
+        let (base, log) = mock_recording(vec![
+            token(),
+            (
+                "GET /v1/search?q=kid%20a&type=track,album,playlist&limit=10",
+                200,
+                r#"{"tracks":{"items":[
+                    {"uri":"spotify:track:t1","name":"Idioteque","duration_ms":309000,
+                     "artists":[{"name":"Radiohead"}]}]},
+                  "albums":{"items":[
+                    {"id":"a1","uri":"spotify:album:a1","name":"Kid A","total_tracks":10,
+                     "artists":[{"name":"Radiohead"}]}]},
+                  "playlists":{"items":[null,
+                    {"uri":"spotify:playlist:p9","name":"Kid A Mnesia"}]}}"#
+                    .into(),
+            ),
+        ]);
+        let mut sp = spotify(&base, Some("R"));
+        let rows = sp
+            .browse(&LibraryPath::Search {
+                query: "kid a".into(),
+            })
+            .unwrap();
+        let titles: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(titles, ["Idioteque", "Kid A", "Kid A Mnesia"]);
+        assert_eq!(
+            rows[0].action,
+            ItemAction::Play(PlayRequest {
+                uris: vec!["spotify:track:t1".into()],
+                ..Default::default()
+            })
+        );
+        assert!(
+            matches!(&rows[1].action, ItemAction::Open(LibraryPath::Album { id, .. }) if id == "a1")
+        );
+        assert_eq!(rows[1].subtitle.as_deref(), Some("album, Radiohead"));
+        assert_eq!(log.lock().unwrap().len(), 2);
     }
 
     #[test]

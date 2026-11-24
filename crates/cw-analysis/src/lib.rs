@@ -14,11 +14,13 @@ pub mod genre;
 pub mod mapping;
 pub mod mask;
 pub mod pca;
+pub mod rhythm;
 pub mod scenes;
 
 pub use clip::{ClipModel, Embedding};
 pub use genre::GenreFamily;
 pub use pca::Pca;
+pub use rhythm::BeatModel;
 pub use scenes::ScenePrompts;
 
 use cw_core::recipe::{AnalysisInfo, DNA_DIMS, Recipe};

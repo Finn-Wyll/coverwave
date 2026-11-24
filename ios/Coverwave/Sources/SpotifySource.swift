@@ -49,6 +49,16 @@ final class SpotifySource: NSObject, MusicSource {
 
     private var token: String? { appRemote?.connectionParameters.accessToken }
 
+    /// The login's token, for Web API calls (library, queue).
+    var webToken: String? { token }
+
+    /// Beyond App Remote's own `app-remote-control`: what the library and
+    /// queue views read.
+    static let libraryScopes = [
+        "user-library-read", "playlist-read-private", "playlist-read-collaborative",
+        "user-read-playback-state", "user-modify-playback-state",
+    ]
+
     func connect() {
         guard let remote = appRemote else { return }
         if remote.isConnected { return }
@@ -69,7 +79,8 @@ final class SpotifySource: NSObject, MusicSource {
     /// Opens Spotify to approve coverwave. An empty URI resumes whatever was
     /// playing (Spotify starts playback as part of this handshake).
     private func authorize() {
-        appRemote?.authorizeAndPlayURI("") { [weak self] installed in
+        appRemote?.authorizeAndPlayURI("", asRadio: false, additionalScopes: Self.libraryScopes) {
+            [weak self] installed in
             guard !installed else { return }
             Task { @MainActor in
                 self?.status = .unavailable("Install Spotify to use it with coverwave")
@@ -89,6 +100,39 @@ final class SpotifySource: NSObject, MusicSource {
             status = .failed(message)
         }
         return true
+    }
+
+    /// Logs in again (for logins made before the library scopes existed,
+    /// or expired ones).
+    func reauthorize() {
+        appRemote?.connectionParameters.accessToken = nil
+        Keychain.delete(Self.tokenKey)
+        if appRemote?.isConnected == true { appRemote?.disconnect() }
+        status = .connecting
+        authorize()
+    }
+
+    /// Plays a track or context URI on this iPhone through App Remote.
+    func play(uri: String) async throws {
+        try await call { api, done in api.play(uri, callback: done) }
+    }
+
+    /// Adds a track to the end of Spotify's queue.
+    func enqueue(_ uri: String) async throws {
+        try await call { api, done in api.enqueueTrackUri(uri, callback: done) }
+    }
+
+    private func call(
+        _ body: (any SPTAppRemotePlayerAPI, @escaping SPTAppRemoteCallback) -> Void
+    ) async throws {
+        guard let api = appRemote?.playerAPI, appRemote?.isConnected == true else {
+            throw LibraryError.message("Spotify isn't connected. Open coverwave's source settings.")
+        }
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+            body(api) { _, error in
+                if let error { c.resume(throwing: error) } else { c.resume() }
+            }
+        }
     }
 
     func disconnect() {

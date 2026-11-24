@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# The command is `coverwave`: `cargo install --path frontends/cw-tui` puts it
+# on your PATH.
+[[bin]]
+name = "coverwave"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1.0.105"
 cw-analysis.workspace = true

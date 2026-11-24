@@ -1,17 +1,20 @@
 # Build, lint and test on Linux, Windows and macOS.
 #
-# MANUAL ONLY: it never runs by itself. Start it from GitHub (Actions > CI >
-# Run workflow) once the workflow is on the default branch.
-#
-# Cost: the repo is private, so runs use the account's free Actions
-# allowance (Windows minutes count 2x, macOS 10x; one full run is roughly
-# 150-250 counted minutes). With GitHub's default $0 spending limit, going
-# over the allowance stops runs instead of charging. Check Settings >
-# Billing and plans before raising any limit.
+# Runs on pushes and pull requests to main only while the repo is PUBLIC,
+# where Actions minutes are free. On a private repo it runs only by hand
+# (Actions > CI > Run workflow), because runs then use the account's
+# allowance (Windows 2x, macOS 10x; a full run is roughly 150-250 counted
+# minutes). The Release workflow publishes binaries and the iOS core.
 name: CI
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+  pull_request:
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -23,6 +26,7 @@ env:
 
 jobs:
   check:
+    if: github.event_name == 'workflow_dispatch' || !github.event.repository.private
     name: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -60,9 +64,9 @@ jobs:
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: cw-tui-${{ runner.os }}
+          name: coverwave-${{ runner.os }}
           path: |
-            target/release/cw-tui
-            target/release/cw-tui.exe
+            target/release/coverwave
+            target/release/coverwave.exe
           if-no-files-found: error
           retention-days: 7

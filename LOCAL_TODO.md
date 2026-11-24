@@ -155,7 +155,7 @@ Spotify server.
 - [ ] Try `com.apple.Music` with Music.app too.
 - [ ] If there is no prompt and only silence: check that
       `frontends/cw-tui/build.rs` embedded the Info.plist
-      (`otool -s __TEXT __info_plist target/debug/cw-tui`). The meter example
+      (`otool -s __TEXT __info_plist target/debug/coverwave`). The meter example
       has no Info.plist, so try the TUI too. Also check System Settings >
       Privacy & Security > Screen & System Audio Recording.
 - [ ] If tap creation fails, print the OSStatus. Suspects, in order:
@@ -223,14 +223,34 @@ Spotify server.
 
 Nothing here has run on Windows yet.
 
-- [ ] **CI, only if you want it:** merge this work to `main`, then on GitHub
-      go to Actions > CI > Run workflow. It builds, lints and tests on
-      Linux, Windows and macOS and attaches the binaries. It never runs on
-      its own. Each run uses roughly 150–250 of the private repo's free
-      monthly Actions minutes. With GitHub's default $0 spending limit it
-      cannot charge you: check Settings > Billing and plans first.
+- [ ] **Make the repo public** (GitHub > Settings > General > Danger
+      Zone) if you want free builds: CI and Release then run on every push.
+      Commits so far show your university email as author; for new ones,
+      use GitHub's noreply address (Settings > Emails) with
+      `git config user.email <id>+<user>@users.noreply.github.com`.
+- [ ] After the first Release run: `ios/fetch-core.sh` then
+      `ios/run-on-iphone.sh` installs the app without building Rust here.
 - [ ] **On a Windows PC (if you have one):** `cargo run -p cw-tui --release`
       in Windows Terminal. Check colours, keys (each key acts once), the
       config at `%APPDATA%\coverwave\config.toml`, the library under
       `%LOCALAPPDATA%\coverwave`, playback, and that `S` → Spotify captures
       audio (whole-system loopback) and opens the login in your browser.
+
+## iPhone app (2026-11-24 additions)
+
+- [ ] **Rhythm maps:** play a few Spotify or Apple Music songs. Settings >
+      This Cover > Rhythm should say "N BPM in 4/4, measured from the
+      song" within a couple of seconds of a new track. The motion should
+      follow the song's own kick/snare/hat pattern, not a generic one.
+- [ ] **Beat lines up without the microphone:** the hits should land on
+      the beat you hear from the first seconds of a song. If a song's
+      Rhythm line says "bar start estimated", Deezer has a different edit
+      of it; tell me which songs feel off.
+- [ ] **Art detail:** Settings > Detail: Standard (64 columns), Fine
+      (96, the new default) and Finest (128). Check Finest still moves
+      smoothly on your iPhone 13; if it stutters, say so.
+- [ ] **Search everywhere:** iPhone library > `/` search finds Spotify
+      catalogue songs (not just your playlists) and Apple Music catalogue
+      songs below your own library matches. On the Mac, Spotify library:
+      `/`, type, `enter` searches all of Spotify.
+

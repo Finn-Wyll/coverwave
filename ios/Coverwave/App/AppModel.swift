@@ -20,9 +20,7 @@ final class AppModel {
     private(set) var accent: Color = Theme.defaultAccent
     /// Where the motion's rhythm comes from, for Settings.
     private(set) var tempoText = "—"
-    private(set) var micActive = false
 
-    @ObservationIgnored private let mic = MicListener()
     @ObservationIgnored private var coverTask: Task<Void, Never>?
     /// The track and genre the shown cover was built for.
     @ObservationIgnored private var coverFor: CoverKey?
@@ -32,8 +30,10 @@ final class AppModel {
         var genre: String?
         var artworkURL: URL?
     }
-    /// Tempo per track ID (nil: looked up, nothing found).
-    @ObservationIgnored private var tempos: [String: Float?] = [:]
+    /// Rhythm map per track ID (nil: looked up, nothing found).
+    @ObservationIgnored private var rhythms: [String: Rhythm?] = [:]
+    @ObservationIgnored private var pending: Set<String> = []
+
 
     var active: (any MusicSource)? {
         switch activeKind {
@@ -44,6 +44,23 @@ final class AppModel {
     }
 
     var nowPlaying: NowPlaying? { active?.nowPlaying }
+
+    @ObservationIgnored private var browsers: [SourceKind: LibraryBrowser] = [:]
+
+    /// Library browsing for the active source (kept per source, so its
+    /// place and cache survive closing the panel).
+    var library: LibraryBrowser? {
+        guard let kind = activeKind else { return nil }
+        if let b = browsers[kind] { return b }
+        let provider: any LibraryProvider =
+            switch kind {
+            case .spotify: SpotifyLibrary(source: spotify)
+            case .appleMusic: AppleMusicLibrary()
+            }
+        let b = LibraryBrowser(provider: provider)
+        browsers[kind] = b
+        return b
+    }
 
     /// A source is connected (the player panel shows instead of the
     /// source chooser).
@@ -59,7 +76,6 @@ final class AppModel {
             activeKind = last
             source(last).resume()
         }
-        if settings.listenWithMicrophone { await setMicrophone(true) }
         await core.loadIfPresent()
         if case .missing = core.modelState { await core.download() }
         modelBecameReady()
@@ -106,7 +122,7 @@ final class AppModel {
             setCover(nil)
             return
         }
-        lookUpTempo(np)
+        lookUpRhythm(np)
         // A new track, or its genre or cover URL arrived (sources report
         // them a moment later). A cover whose embedding is cached rebuilds
         // instantly.
@@ -149,18 +165,21 @@ final class AppModel {
 
     // MARK: Motion
 
-    private func lookUpTempo(_ np: NowPlaying) {
-        guard settings.tempoLookup, tempos[np.trackID] == nil else { return refreshTempoText() }
-        tempos[np.trackID] = .some(nil)
+    private func lookUpRhythm(_ np: NowPlaying) {
+        guard settings.tempoLookup, rhythms[np.trackID] == nil else { return refreshTempoText() }
+        rhythms[np.trackID] = .some(nil)
+        pending.insert(np.trackID)
+        refreshTempoText()
         Task { [weak self] in
-            let bpm = await TempoLookup.bpm(for: np)
-            self?.tempos[np.trackID] = .some(bpm)
+            let rhythm = await RhythmLookup.rhythm(for: np)
+            self?.rhythms[np.trackID] = .some(rhythm)
+            self?.pending.remove(np.trackID)
             self?.refreshTempoText()
         }
     }
 
-    private func knownTempo(_ trackID: String) -> Float? {
-        settings.tempoLookup ? tempos[trackID] ?? nil : nil
+    private func rhythm(_ trackID: String) -> Rhythm? {
+        settings.tempoLookup ? rhythms[trackID] ?? nil : nil
     }
 
     private func refreshTempoText() {
@@ -168,10 +187,12 @@ final class AppModel {
             tempoText = "—"
             return
         }
-        if micActive {
-            tempoText = "Microphone"
-        } else if let bpm = knownTempo(np.trackID) {
-            tempoText = "\(Int(bpm.rounded())) BPM"
+        if let r = rhythm(np.trackID) {
+            tempoText =
+                "\(Int(r.bpm().rounded())) BPM in \(r.beatsPerBar())/4, measured from the song"
+                + (r.isAligned() ? "" : " (bar start estimated)")
+        } else if settings.tempoLookup, pending.contains(np.trackID) {
+            tempoText = "Measuring the song's rhythm…"
         } else {
             let family = np.genre.map(genreFamily) ?? "unknown"
             let typical = cover?.typicalBpm() ?? 110
@@ -188,30 +209,17 @@ final class AppModel {
         }
     }
 
-    func setMicrophone(_ on: Bool) async {
-        settings.listenWithMicrophone = on
-        if on {
-            micActive = await mic.start()
-            if !micActive { settings.listenWithMicrophone = false }
-        } else {
-            mic.stop()
-            micActive = false
-        }
-        refreshTempoText()
-    }
-
     private static let silence = AudioLevels(
         bands: Array(repeating: 0, count: 6), level: 0, onset: 0, onsetCount: 0)
 
-    /// What drives the motion at `date`: the microphone when it hears the
-    /// music, else a beat clock at the track's tempo with its genre's rhythm.
+    /// What drives the motion at `date`: the song's rhythm map against the
+    /// playback position; else a beat clock at the genre's typical tempo.
     func levels(at date: Date) -> AudioLevels {
         guard let np = nowPlaying else { return Self.silence }
-        if micActive, np.isPlaying, let heard = mic.levels(at: date) { return heard }
-        return beatLevels(
-            bpm: knownTempo(np.trackID) ?? 0,
-            genre: np.genre,
-            positionSecs: np.position(at: date),
-            playing: np.isPlaying)
+        let position = np.position(at: date)
+        guard let r = rhythm(np.trackID) else {
+            return beatLevels(bpm: 0, genre: np.genre, positionSecs: position, playing: np.isPlaying)
+        }
+        return r.levels(positionSecs: position, playing: np.isPlaying, downbeatSecs: r.defaultDownbeat())
     }
 }

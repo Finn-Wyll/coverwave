@@ -69,6 +69,10 @@ pub enum LibraryPath {
         name: String,
         uri: String,
     },
+    /// Songs, albums and playlists in the whole catalogue matching `query`.
+    Search {
+        query: String,
+    },
 }
 
 impl LibraryPath {
@@ -80,6 +84,7 @@ impl LibraryPath {
             LibraryPath::Playlists => "Playlists",
             LibraryPath::Albums => "Albums",
             LibraryPath::Playlist { name, .. } | LibraryPath::Album { name, .. } => name,
+            LibraryPath::Search { query } => query,
         }
     }
 }

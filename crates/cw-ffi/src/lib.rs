@@ -5,7 +5,7 @@
 //! recipe mapping, renderer and beat clock the terminal app uses, so a cover
 //! moves identically on both.
 //!
-//! No I/O happens here. Swift fetches covers, the CLIP model and Deezer
+//! No I/O happens here. Swift fetches covers, the CLIP model and song
 //! previews, and decodes audio with AVFoundation; this crate only computes.
 //!
 //! Threading: [`CoverEngine::analyse`] is slow (CLIP inference, around a
@@ -441,57 +441,101 @@ pub fn genre_family(genre: String) -> String {
     GenreFamily::of_any(&genre).name().to_string()
 }
 
-/// A tempo estimate (see `cw_audio::estimate_tempo`).
-#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
-pub struct Tempo {
-    pub bpm: f32,
-    pub confidence: f32,
+// MARK: Rhythm maps
+
+/// Errors from measuring or reading a rhythm map.
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+#[uniffi(flat_error)]
+pub enum RhythmFailure {
+    #[error("{0}")]
+    Failed(String),
 }
 
-/// Minimum confidence worth trusting; below it use the genre's tempo.
-#[uniffi::export]
-pub fn min_tempo_confidence() -> f32 {
-    0.3
-}
-
-/// Estimates the tempo of a mono clip (e.g. a decoded 30-second preview).
-#[uniffi::export]
-pub fn estimate_tempo(samples: Vec<f32>, sample_rate: u32) -> Option<Tempo> {
-    cw_audio::estimate_tempo(&samples, sample_rate).map(|t| Tempo {
-        bpm: t.bpm,
-        confidence: t.confidence,
-    })
-}
-
-/// Live analysis of microphone audio: push mono samples as they arrive,
-/// read levels once per frame.
+/// The Beat This! beat tracker (bundled with the app, MIT licence). Measures
+/// a song's rhythm map from a short clip (its 30-second preview). Slow
+/// (about a second on a phone): call off the main thread.
 #[derive(uniffi::Object)]
-pub struct LiveAnalyser {
-    inner: Mutex<cw_audio::Analyser>,
+pub struct RhythmEngine {
+    model: cw_analysis::BeatModel,
 }
 
 #[uniffi::export]
-impl LiveAnalyser {
+impl RhythmEngine {
     #[uniffi::constructor]
-    pub fn new(sample_rate: u32) -> Arc<LiveAnalyser> {
-        Arc::new(LiveAnalyser {
-            inner: Mutex::new(cw_audio::Analyser::new(sample_rate.max(8000))),
-        })
+    pub fn new(onnx: Vec<u8>) -> Result<Arc<RhythmEngine>, RhythmFailure> {
+        let model = cw_analysis::BeatModel::from_onnx_bytes(&onnx)
+            .map_err(|e| RhythmFailure::Failed(e.to_string()))?;
+        Ok(Arc::new(RhythmEngine { model }))
     }
 
-    pub fn push(&self, samples: Vec<f32>) {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(&samples);
+    /// The rhythm map of a mono clip at any sample rate. `clip_start`:
+    /// where the clip starts in the song, if known (48s for Deezer
+    /// previews); it sets the bar phase.
+    pub fn measure(
+        &self,
+        samples: Vec<f32>,
+        sample_rate: u32,
+        clip_start: Option<f64>,
+    ) -> Result<Arc<Rhythm>, RhythmFailure> {
+        let mut map = self
+            .model
+            .map(&samples, sample_rate)
+            .map_err(|e| RhythmFailure::Failed(e.to_string()))?;
+        map.clip_start = clip_start.map(|s| s as f32);
+        Ok(Arc::new(Rhythm { map }))
+    }
+}
+
+/// A song's rhythm map (see `cw_core::rhythm`).
+#[derive(uniffi::Object)]
+pub struct Rhythm {
+    map: cw_core::RhythmMap,
+}
+
+#[uniffi::export]
+impl Rhythm {
+    /// A map saved with [`Rhythm::to_json`]; fails for other versions.
+    #[uniffi::constructor]
+    pub fn from_json(json: String) -> Result<Arc<Rhythm>, RhythmFailure> {
+        let map: cw_core::RhythmMap =
+            serde_json::from_str(&json).map_err(|e| RhythmFailure::Failed(e.to_string()))?;
+        if !map.is_valid() {
+            return Err(RhythmFailure::Failed("outdated rhythm map".into()));
+        }
+        Ok(Arc::new(Rhythm { map }))
     }
 
-    pub fn levels(&self) -> AudioLevels {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .frame()
-            .into()
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(&self.map).unwrap_or_default()
+    }
+
+    pub fn bpm(&self) -> f32 {
+        self.map.bpm
+    }
+
+    pub fn beats_per_bar(&self) -> u8 {
+        self.map.beats_per_bar
+    }
+
+    /// How regular the clip's beats were (0..1).
+    pub fn confidence(&self) -> f32 {
+        self.map.confidence
+    }
+
+    /// A downbeat time in the song, for [`Rhythm::levels`].
+    pub fn default_downbeat(&self) -> f64 {
+        self.map.downbeat()
+    }
+
+    /// Whether the bar phase is known (the clip's place in the song was).
+    pub fn is_aligned(&self) -> bool {
+        self.map.is_aligned()
+    }
+
+    /// The song's groove at `position_secs`, with a downbeat at
+    /// `downbeat_secs` into the track.
+    pub fn levels(&self, position_secs: f64, playing: bool, downbeat_secs: f64) -> AudioLevels {
+        self.map.frame(position_secs, playing, downbeat_secs).into()
     }
 }
 
@@ -549,15 +593,36 @@ mod tests {
     }
 
     #[test]
-    fn beat_levels_and_live_analyser() {
+    fn rhythm_round_trips_with_its_clip_start() {
+        let n = 16;
+        let mut accents = vec![0.0; n];
+        accents[0] = 1.0;
+        accents[8] = 0.8;
+        let map = cw_core::RhythmMap {
+            version: cw_core::rhythm::RHYTHM_VERSION,
+            bpm: 120.0,
+            beats_per_bar: 4,
+            first_downbeat: 0.4,
+            clip_start: Some(48.0),
+            hits: vec![[0.5; BAND_COUNT]; n],
+            levels: vec![[0.2; BAND_COUNT]; n],
+            accents,
+            confidence: 0.9,
+        };
+        let r = Arc::new(Rhythm { map });
+        let back = Rhythm::from_json(r.to_json()).unwrap();
+        assert_eq!(back.bpm(), 120.0);
+        assert!((back.default_downbeat() - 48.4).abs() < 1e-5 && back.is_aligned());
+        assert!(back.levels(0.41, true, 0.4).onset > 0.5);
+        assert!(Rhythm::from_json("{}".into()).is_err());
+    }
+
+    #[test]
+    fn beat_levels_genre_and_idle() {
         let paused = beat_levels(0.0, None, 3.0, false);
         assert_eq!(paused, AudioLevels::default());
         let lv = beat_levels(0.0, Some("ambient".into()), 1.0, true);
         assert_eq!(lv.bands.len(), BAND_COUNT);
-        let live = LiveAnalyser::new(48_000);
-        let tone: Vec<f32> = (0..4800).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
-        live.push(tone);
-        assert_eq!(live.levels().bands.len(), BAND_COUNT);
         assert_eq!(genre_family("Death Metal".into()), "metal");
         let idle = idle_frame(40, 20, 0, 7, CoverColor { r: 0, g: 0, b: 0 });
         assert_eq!(idle.glyphs.chars().count(), 800);

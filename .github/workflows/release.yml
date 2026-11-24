@@ -1,0 +1,155 @@
+# Builds everything heavy on GitHub and publishes it as the rolling
+# "latest-build" pre-release, so a Mac does not need a 16 GB Rust build
+# folder to run coverwave:
+#
+#   - CoverwaveCore.xcframework.zip + CoverwaveCore.swift: the iOS Rust core
+#     and its Swift bindings (ios/build-core.sh). ios/fetch-core.sh
+#     downloads them; Xcode then only compiles the Swift app and signs it.
+#   - BeatThis-small.onnx: the beat tracker (ios/tools/export_beat_model.py).
+#   - the coverwave terminal app for macOS (Apple silicon), Linux and Windows.
+#   - build-info.txt: the commit they were built from.
+#
+# Runs on every push to main that touches code, and by hand (Actions >
+# Release > Run workflow). Pushes only build while the repo is PUBLIC, where
+# Actions minutes are free; on a private repo only manual runs build (they
+# use the account's minutes, macOS counting 10x).
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+
+concurrency:
+  group: release
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  ios-core:
+    if: github.event_name == 'workflow_dispatch' || !github.event.repository.private
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ios-core
+      - name: Build the core
+        run: ios/build-core.sh
+      - name: Package
+        run: |
+          mkdir -p out
+          (cd ios/Frameworks && zip -qry ../../out/CoverwaveCore.xcframework.zip CoverwaveCore.xcframework)
+          cp ios/Coverwave/Generated/CoverwaveCore.swift out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-core
+          path: out/*
+          if-no-files-found: error
+          retention-days: 3
+
+  beat-model:
+    if: github.event_name == 'workflow_dispatch' || !github.event.repository.private
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cached model
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: out/BeatThis-small.onnx
+          key: beat-model-${{ hashFiles('ios/tools/export_beat_model.py') }}
+      - uses: actions/setup-python@v5
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          python-version: "3.12"
+      - name: Export Beat This! small0 (MIT) to ONNX
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          pip install --quiet torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install --quiet onnx onnxruntime onnxscript einops soxr rotary-embedding-torch \
+            numpy soundfile tqdm "git+https://github.com/CPJKU/beat_this.git"
+          python ios/tools/export_beat_model.py out/BeatThis-small.onnx
+      - uses: actions/upload-artifact@v4
+        with:
+          name: beat-model
+          path: out/BeatThis-small.onnx
+          if-no-files-found: error
+          retention-days: 3
+
+  tui:
+    if: github.event_name == 'workflow_dispatch' || !github.event.repository.private
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macos-arm64
+          - os: ubuntu-latest
+            name: linux-x64
+          - os: windows-latest
+            name: windows-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: tui
+      - name: ALSA headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - name: Build
+        run: cargo build --release -p cw-tui
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p out
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z a -bso0 "out/coverwave-${{ matrix.name }}.zip" ./target/release/coverwave.exe
+          else
+            tar -czf "out/coverwave-${{ matrix.name }}.tar.gz" -C target/release coverwave
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tui-${{ matrix.name }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    needs: [ios-core, beat-model, tui]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish the latest-build pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          printf 'commit %s\nbuilt %s\n' "$GITHUB_SHA" "$(date -u +%Y-%m-%dT%H:%MZ)" > dist/build-info.txt
+          gh release delete latest-build --yes --cleanup-tag || true
+          gh release create latest-build dist/* \
+            --prerelease --target "$GITHUB_SHA" \
+            --title "Latest build (${GITHUB_SHA::7})" \
+            --notes "Built from ${GITHUB_SHA} by the Release workflow. ios/fetch-core.sh downloads the iOS core and beat model from here."

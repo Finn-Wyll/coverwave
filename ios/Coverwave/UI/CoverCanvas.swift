@@ -11,8 +11,35 @@ enum Theme {
     static let defaultAccent = Color(red: 196 / 255, green: 204 / 255, blue: 214 / 255)
 }
 
-/// The character grid that fits a canvas: about 64 columns on a phone, 100
-/// on an iPad, in SF Mono.
+/// How many characters the art is made of (see `CellMetrics`). Finer
+/// detail means smaller glyphs: the cover reads more like the picture.
+enum ArtDetail: String, CaseIterable, Identifiable {
+    case standard
+    case fine
+    case finest
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .standard: "Standard"
+        case .fine: "Fine"
+        case .finest: "Finest"
+        }
+    }
+
+    /// Columns across a phone; an iPad gets about 1.5 times as many.
+    var phoneColumns: CGFloat {
+        switch self {
+        case .standard: 64
+        case .fine: 96
+        case .finest: 128
+        }
+    }
+}
+
+/// The character grid that fits a canvas, in SF Mono: 64, 96 or 128
+/// columns on a phone (by `ArtDetail`), 1.5 times that on an iPad.
 struct CellMetrics: Equatable {
     let fontSize: CGFloat
     let cellWidth: CGFloat
@@ -29,9 +56,10 @@ struct CellMetrics: Equatable {
         return ("M" as NSString).size(withAttributes: [.font: font]).width / 100
     }()
 
-    init(size: CGSize) {
-        let targetCols: CGFloat = size.width < 500 ? 64 : 100
-        let fs = min(16, max(6, size.width / targetCols / Self.advancePerPoint))
+    init(size: CGSize, detail: ArtDetail = .fine) {
+        let targetCols = detail.phoneColumns * (size.width < 500 ? 1 : 1.5)
+        // 4pt is still 12 pixels tall on a 3x screen.
+        let fs = min(16, max(4, size.width / targetCols / Self.advancePerPoint))
         fontSize = fs
         cellWidth = fs * Self.advancePerPoint
         cellHeight = fs * 1.2
@@ -187,9 +215,10 @@ struct CoverCanvas: View {
     var body: some View {
         let cover = model.cover
         let mode = model.settings.artMode
+        let detail = model.settings.artDetail
         TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !animate)) { timeline in
             Canvas(opaque: true, rendersAsynchronously: false) { context, size in
-                let metrics = CellMetrics(size: size)
+                let metrics = CellMetrics(size: size, detail: detail)
                 let frame = renderer.frame(
                     cover: cover, metrics: metrics, mode: mode, animate: animate,
                     date: timeline.date

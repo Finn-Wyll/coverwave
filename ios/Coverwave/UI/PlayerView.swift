@@ -1,283 +1,469 @@
 import SwiftUI
 
-/// The one screen: the cover fills it, and the controls float over it on
-/// translucent panels. Tap the art (or flick the panel down) to hide the
-/// chrome; tap again to bring it back.
+/// The one screen: the cover, and nothing else until you touch it. The art
+/// is the control (see `GestureScheme`); text appears in the cover's own
+/// terminal style while you touch, and the library and queue slide over it
+/// following the finger.
 struct PlayerView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var chromeHidden = false
+
     @State private var showSettings = false
+    @State private var hudVisible = true
+    @State private var status: String?
+    @State private var hideTask: Task<Void, Never>?
+    @State private var statusTask: Task<Void, Never>?
+
+    /// Live gesture state.
+    @State private var axis: Axis?
+    @State private var artOffset: CGFloat = 0
+    @State private var scrubStart: (fraction: Double, x: CGFloat)?
+    @State private var scrub: Double?
+    @State private var dialCenter: CGPoint?
+    @State private var dialPick: DialOption?
+
+    /// Panels: open state plus a live drag offset from their resting place.
+    @State private var libraryOpen = false
+    @State private var libraryDrag: CGFloat = 0
+    @State private var queueOpen = false
+    @State private var queueDrag: CGFloat = 0
 
     var body: some View {
-        let animate = model.settings.animates(reduceMotion: reduceMotion)
-        ZStack {
-            Theme.page.ignoresSafeArea()
-            CoverCanvas(animate: animate)
-                .id(model.coverHash)
-                .transition(.opacity)
-                .ignoresSafeArea(edges: .bottom)
-                .contentShape(Rectangle())
-                .onTapGesture { setChrome(hidden: !chromeHidden) }
-                .accessibilityAction(named: chromeHidden ? "Show controls" : "Hide controls") {
-                    setChrome(hidden: !chromeHidden)
-                }
-        }
-        .animation(.easeInOut(duration: 0.45), value: model.coverHash)
-        .overlay(alignment: .top) {
-            TopBar(showSettings: $showSettings)
-                .opacity(chromeHidden ? 0 : 1)
-                .offset(y: chromeHidden && !reduceMotion ? -16 : 0)
-                .allowsHitTesting(!chromeHidden)
-        }
-        .overlay(alignment: .bottom) {
-            Group {
+        GeometryReader { geo in
+            let size = geo.size
+            ZStack {
+                Theme.page.ignoresSafeArea()
+                art(size: size)
                 if model.isFollowing {
-                    NowPlayingPanel(hidden: $chromeHidden)
+                    following(size: size)
                 } else {
-                    ConnectCard()
-                        .opacity(chromeHidden ? 0 : 1)
-                        .allowsHitTesting(!chromeHidden)
+                    ConnectScreen()
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 4)
-            .frame(maxWidth: 560)
         }
         .tint(model.accent)
+        .preferredColorScheme(.dark)
         .sheet(isPresented: $showSettings) {
             SettingsView()
-                .presentationDetents([.medium, .large])
-                .presentationBackground(.regularMaterial)
+                .presentationDetents([.large])
+                .presentationBackground(Theme.page)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { model.sceneBecameActive() }
         }
-        .statusBarHidden(chromeHidden)
-        .persistentSystemOverlays(chromeHidden ? .hidden : .automatic)
+        .onChange(of: model.nowPlaying?.trackID) { poke() }
+        .onChange(of: model.nowPlaying?.isPlaying) { poke() }
+        .statusBarHidden(!hudVisible || libraryOpen)
+        .persistentSystemOverlays(hudVisible ? .automatic : .hidden)
     }
 
-    private func setChrome(hidden: Bool) {
-        withAnimation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.4, dampingFraction: 1)) {
-            chromeHidden = hidden
-        }
+    // MARK: Layers
+
+    private func art(size: CGSize) -> some View {
+        let animate = model.settings.animates(reduceMotion: reduceMotion)
+        return CoverCanvas(animate: animate)
+            .id(model.coverHash)
+            .transition(.opacity)
+            .ignoresSafeArea(edges: .bottom)
+            .offset(x: reduceMotion ? 0 : artOffset)
+            // Dim behind the scrub time, the dial and open panels.
+            .overlay {
+                Theme.page
+                    .opacity(scrub != nil || dialCenter != nil ? 0.45 : panelDim(size: size))
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
+            .animation(.easeInOut(duration: 0.45), value: model.coverHash)
     }
-}
 
-/// Source picker (anchored to its chip) and settings.
-private struct TopBar: View {
-    @Environment(AppModel.self) private var model
-    @Binding var showSettings: Bool
+    @ViewBuilder private func following(size: CGSize) -> some View {
+        GestureSurface { handle($0, size: size) }
+            .ignoresSafeArea()
+            .accessibilityElement()
+            .accessibilityLabel(accessibilityTitle)
+            .accessibilityHint("Double-tap to play or pause. More actions are available.")
+            .accessibilityAction { playPause() }
+            .accessibilityAction(named: "Next") { next() }
+            .accessibilityAction(named: "Previous") { previous() }
+            .accessibilityAction(named: "Library") { setLibrary(open: true, velocity: 0, size: size) }
+            .accessibilityAction(named: "Queue") { setQueue(open: true, velocity: 0, size: size) }
+            .accessibilityAction(named: "Settings") { showSettings = true }
 
-    var body: some View {
-        HStack(spacing: 10) {
-            if let kind = model.activeKind {
-                Menu {
-                    ForEach(SourceKind.allCases) { option in
-                        Button {
-                            model.choose(option)
-                        } label: {
-                            Label(option.name, systemImage: option.symbol)
-                        }
-                        .disabled(option == .spotify && !model.spotify.isConfigured)
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: kind.symbol)
-                        Text(kind.name)
-                        Image(systemName: "chevron.down").font(.caption2.weight(.bold))
-                    }
-                    .font(.subheadline.weight(.medium))
-                    .padding(.horizontal, 14)
-                    .frame(height: 36)
-                    .background(Panel(cornerRadius: 18))
-                }
-                .accessibilityLabel("Source: \(kind.name)")
-            }
-            Spacer()
-            ModelBadge()
-            Button {
-                showSettings = true
-            } label: {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.subheadline.weight(.medium))
-                    .frame(width: 36, height: 36)
-                    .background(Panel(cornerRadius: 18))
-            }
-            .buttonStyle(PressStyle(scale: 0.9))
-            .accessibilityLabel("Settings")
-        }
-        .foregroundStyle(.primary)
-        .padding(.horizontal, 16)
-        .padding(.top, 6)
-    }
-}
-
-/// Shown only while the cover-analysis model downloads or loads.
-private struct ModelBadge: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        let text: String? =
-            switch model.core.modelState {
-            case .downloading(let f): "Preparing covers \(Int(f * 100))%"
-            case .loading: "Preparing covers"
-            default: nil
-            }
-        if let text {
-            Text(text)
-                .font(.caption.weight(.medium).monospacedDigit())
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .frame(height: 28)
-                .background(Panel(cornerRadius: 14))
+        if let center = dialCenter {
+            DialView(selected: dialPick)
+                .position(center)
                 .transition(.opacity)
+                .allowsHitTesting(false)
         }
-    }
-}
 
-/// Track, progress and transport. Drag it down to hide; it follows the
-/// finger, resists being pulled up, and is thrown by the release velocity.
-private struct NowPlayingPanel: View {
-    @Environment(AppModel.self) private var model
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Binding var hidden: Bool
-    @State private var drag: CGFloat = 0
-    @State private var height: CGFloat = 240
-
-    private var hiddenOffset: CGFloat { height + 60 }
-
-    var body: some View {
-        content
-            .padding(.horizontal, 20)
-            .padding(.top, 10)
-            .padding(.bottom, 16)
-            .background(Panel())
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
-            .offset(y: hidden ? hiddenOffset : resisted(drag))
-            .opacity(reduceMotion && hidden ? 0 : 1)
-            .gesture(
-                DragGesture(minimumDistance: 10)
-                    .onChanged { drag = $0.translation.height }
-                    .onEnded(release)
+        VStack {
+            Spacer()
+            HUD(
+                track: model.nowPlaying,
+                sourceName: model.activeKind?.name ?? "",
+                status: status ?? modelStatus,
+                scrub: scrub,
+                onScrub: barScrub
             )
-            .accessibilityAction(named: "Hide controls") { settle(hide: true, velocity: 0) }
+            .opacity(hudVisible || scrub != nil ? 1 : 0)
+            .allowsHitTesting(hudVisible)
+            .accessibilityHidden(!hudVisible)
+        }
+        .animation(.easeInOut(duration: 0.25), value: hudVisible)
+
+        // Tapping the art around an open panel closes it.
+        if libraryOpen || queueOpen {
+            Color.clear
+                .contentShape(Rectangle())
+                .ignoresSafeArea()
+                .onTapGesture {
+                    setLibrary(open: false, velocity: 0, size: size)
+                    setQueue(open: false, velocity: 0, size: size)
+                }
+                .accessibilityHidden(true)
+        }
+
+        queuePanel(size: size)
+        libraryPanel(size: size)
+
+        if !model.settings.seenGestureGuide {
+            GestureGuide(scheme: model.settings.gestures) {
+                withAnimation(.easeOut(duration: 0.25)) { model.settings.seenGestureGuide = true }
+            }
+            .transition(.opacity)
+        }
     }
 
-    @ViewBuilder private var content: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Capsule()
-                .fill(.secondary.opacity(0.6))
-                .frame(width: 36, height: 5)
-                .frame(maxWidth: .infinity)
-                .accessibilityHidden(true)
-            if let source = model.active, let np = model.nowPlaying {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(np.title)
-                        .font(.title3.weight(.semibold))
-                        .tracking(-0.2)
-                    Text(np.artist)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+    private func libraryHeight(_ size: CGSize) -> CGFloat { size.height * 0.86 }
+    private func queueHeight(_ size: CGSize) -> CGFloat { size.height * 0.58 }
+
+    @ViewBuilder private func libraryPanel(size: CGSize) -> some View {
+        let h = libraryHeight(size)
+        let rest: CGFloat = libraryOpen ? 0 : h + 40
+        let offset = libraryOffset(rest + libraryDrag, height: h)
+        if let browser = model.library, libraryOpen || libraryDrag != 0 {
+            LibraryPanel(
+                browser: browser,
+                onHeaderDrag: { dy, velocity in
+                    if let velocity {
+                        let close = projected(dy, velocity: velocity) > h * 0.3
+                        setLibrary(open: !close, velocity: velocity, size: size)
+                    } else {
+                        libraryDrag = dy
+                    }
+                },
+                close: { setLibrary(open: false, velocity: 0, size: size) }
+            )
+            .frame(height: h)
+            .frame(maxHeight: .infinity, alignment: .bottom)
+            .ignoresSafeArea(edges: .bottom)
+            .offset(y: offset)
+            .accessibilityAddTraits(.isModal)
+        }
+    }
+
+    @ViewBuilder private func queuePanel(size: CGSize) -> some View {
+        let h = queueHeight(size)
+        let rest: CGFloat = queueOpen ? 0 : -(h + 40)
+        let offset = queueOffset(rest + queueDrag, height: h)
+        if queueOpen || queueDrag != 0 {
+            QueuePanel(
+                provider: model.library?.provider,
+                onHeaderDrag: { dy, velocity in
+                    if let velocity {
+                        let close = projected(dy, velocity: velocity) < -h * 0.3
+                        setQueue(open: !close, velocity: velocity, size: size)
+                    } else {
+                        queueDrag = dy
+                    }
+                },
+                close: { setQueue(open: false, velocity: 0, size: size) }
+            )
+            .id(model.nowPlaying?.trackID)
+            .frame(height: h)
+            .frame(maxHeight: .infinity, alignment: .top)
+            .ignoresSafeArea(edges: .top)
+            .offset(y: offset)
+            .accessibilityAddTraits(.isModal)
+        }
+    }
+
+    /// Past fully open, the panel resists.
+    private func libraryOffset(_ y: CGFloat, height: CGFloat) -> CGFloat {
+        y < 0 ? rubberband(y, limit: height) : y
+    }
+
+    private func queueOffset(_ y: CGFloat, height: CGFloat) -> CGFloat {
+        y > 0 ? rubberband(y, limit: height) : y
+    }
+
+    /// The art dims as a panel comes in, in step with the finger.
+    private func panelDim(size: CGSize) -> Double {
+        let lib = libraryOpen ? 1 : min(1, max(0, -libraryDrag / libraryHeight(size)))
+        let q = queueOpen ? 1 : min(1, max(0, queueDrag / queueHeight(size)))
+        return 0.5 * max(lib, q)
+    }
+
+    // MARK: Gestures
+
+    private func handle(_ event: SurfaceEvent, size: CGSize) {
+        poke()
+        let scheme = model.settings.gestures
+        switch event {
+        case .tap(let p):
+            if !model.settings.seenGestureGuide { return }
+            switch scheme {
+            case .direct, .dial: playPause()
+            case .zones:
+                let third = p.x / max(1, size.width)
+                if third < 1 / 3 { previous() } else if third > 2 / 3 { next() } else { playPause() }
+            }
+
+        case .twoFingerTap:
+            showSettings = true
+
+        case .panChanged(let t):
+            if axis == nil { axis = abs(t.width) > abs(t.height) ? .horizontal : .vertical }
+            if axis == .horizontal {
+                artOffset = rubberband(t.width, limit: 60)
+                let p = projected(t.width, velocity: 0)
+                flash(p < -swipeCommit ? "> next" : p > swipeCommit ? "< previous" : nil, hold: true)
+            } else {
+                // The panel follows the finger 1:1 from its edge.
+                if t.height < 0 {
+                    libraryDrag = t.height
+                    queueDrag = 0
+                } else {
+                    queueDrag = t.height
+                    libraryDrag = 0
                 }
-                .lineLimit(1)
-                .accessibilityElement(children: .combine)
-                Scrubber(track: np) { source.seek(to: $0) }
-                TransportControls(source: source, isPlaying: np.isPlaying, enabled: true)
-            } else if let source = model.active {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Nothing playing").font(.title3.weight(.semibold))
-                    Text("Start something in \(source.kind.name).")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+            }
+
+        case .panEnded(let t, let v):
+            defer { axis = nil }
+            if axis == .horizontal {
+                let p = projected(t.width, velocity: v.width)
+                if p < -swipeCommit { next() } else if p > swipeCommit { previous() } else { flash(nil) }
+                withAnimation(spring(velocity: v.width, distance: -artOffset)) { artOffset = 0 }
+            } else if axis == .vertical {
+                let p = projected(t.height, velocity: v.height)
+                if t.height < 0 {
+                    setLibrary(open: p < -swipeCommit * 1.4, velocity: v.height, size: size)
+                } else {
+                    setQueue(open: p > swipeCommit * 1.4, velocity: v.height, size: size)
                 }
-                TransportControls(source: source, isPlaying: false, enabled: false)
+            }
+
+        case .holdBegan(let p):
+            Haptics.tick()
+            if scheme == .dial {
+                withAnimation(.easeOut(duration: 0.15)) { dialCenter = p }
+                dialPick = nil
+            } else if let np = model.nowPlaying, let d = np.duration, d > 0 {
+                let f = min(1, np.position(at: .now) / d)
+                scrubStart = (f, p.x)
+                scrub = f
+            }
+
+        case .holdMoved(let p):
+            if let c = dialCenter {
+                let pick = DialOption.at(CGSize(width: p.x - c.x, height: p.y - c.y))
+                if pick != dialPick {
+                    dialPick = pick
+                    if pick != nil { Haptics.tick() }
+                }
+            } else if let start = scrubStart {
+                // A full screen width spans the whole track.
+                scrub = min(1, max(0, start.fraction + Double((p.x - start.x) / max(1, size.width))))
+            }
+
+        case .holdEnded:
+            if dialCenter != nil {
+                let pick = dialPick
+                withAnimation(.easeOut(duration: 0.15)) { dialCenter = nil }
+                dialPick = nil
+                switch pick {
+                case .library: setLibrary(open: true, velocity: 0, size: size)
+                case .queue: setQueue(open: true, velocity: 0, size: size)
+                case .previous: previous()
+                case .next: next()
+                case nil: break
+                }
+            } else if let f = scrub {
+                finishScrub(f)
+            }
+            scrubStart = nil
+        }
+    }
+
+    /// The HUD's bar can be dragged in every scheme.
+    private func barScrub(_ fraction: Double?, _ done: Bool) {
+        poke()
+        guard let fraction else { return }
+        if done { finishScrub(fraction) } else { scrub = fraction }
+    }
+
+    private func finishScrub(_ fraction: Double) {
+        if let np = model.nowPlaying, let d = np.duration, d > 0 {
+            model.active?.seek(to: fraction * d)
+            Haptics.commit()
+            flash("> \(timeText(fraction * d))")
+        }
+        // Hold the new position until the source reports it.
+        Task {
+            try? await Task.sleep(for: .milliseconds(600))
+            scrub = nil
+        }
+    }
+
+    private var swipeCommit: CGFloat { 90 }
+
+    /// A spring that continues at the finger's release velocity.
+    private func spring(velocity: CGFloat, distance: CGFloat) -> Animation {
+        if reduceMotion { return .easeInOut(duration: 0.2) }
+        let relative = abs(distance) > 1 ? velocity / distance : 0
+        return .interpolatingSpring(duration: 0.35, bounce: 0, initialVelocity: relative)
+    }
+
+    private func setLibrary(open: Bool, velocity: CGFloat, size: CGSize) {
+        if open { setQueue(open: false, velocity: 0, size: size) }
+        if open != libraryOpen { Haptics.commit() }
+        let h = libraryHeight(size)
+        let from = (libraryOpen ? 0 : h + 40) + libraryDrag
+        let to: CGFloat = open ? 0 : h + 40
+        withAnimation(spring(velocity: velocity, distance: to - from)) {
+            libraryOpen = open
+            libraryDrag = 0
+        }
+    }
+
+    private func setQueue(open: Bool, velocity: CGFloat, size: CGSize) {
+        if open { setLibrary(open: false, velocity: 0, size: size) }
+        if open != queueOpen { Haptics.commit() }
+        let h = queueHeight(size)
+        let from = (queueOpen ? 0 : -(h + 40)) + queueDrag
+        let to: CGFloat = open ? 0 : -(h + 40)
+        withAnimation(spring(velocity: velocity, distance: to - from)) {
+            queueOpen = open
+            queueDrag = 0
+        }
+    }
+
+    // MARK: Actions
+
+    private func playPause() {
+        guard let source = model.active else { return }
+        let playing = model.nowPlaying?.isPlaying ?? false
+        source.playPause()
+        Haptics.commit()
+        flash(playing ? "|| paused" : "> playing")
+    }
+
+    private func next() {
+        model.active?.next()
+        Haptics.commit()
+        flash(">> next")
+    }
+
+    private func previous() {
+        model.active?.previous()
+        Haptics.commit()
+        flash("<< previous")
+    }
+
+    /// Shows the HUD, then fades it while music plays.
+    private func poke() {
+        if !hudVisible { withAnimation(.easeOut(duration: 0.2)) { hudVisible = true } }
+        hideTask?.cancel()
+        hideTask = Task {
+            try? await Task.sleep(for: .seconds(3.5))
+            guard !Task.isCancelled else { return }
+            // Paused, or nothing playing: keep it up.
+            if model.nowPlaying?.isPlaying == true, scrub == nil, dialCenter == nil {
+                withAnimation(.easeInOut(duration: 0.6)) { hudVisible = false }
             }
         }
     }
 
-    /// Past the resting position upward, the panel follows less and less.
-    private func resisted(_ y: CGFloat) -> CGFloat {
-        guard y < 0 else { return y }
-        let d = max(height, 1)
-        let c: CGFloat = 0.55
-        return -(-y * d * c) / (d + c * -y)
-    }
-
-    private func release(_ value: DragGesture.Value) {
-        // Decide from where the flick is heading, not where it let go.
-        let hide = value.predictedEndTranslation.height > height * 0.5
-        settle(hide: hide, velocity: value.velocity.height)
-    }
-
-    private func settle(hide: Bool, velocity: CGFloat) {
-        let target = hide ? hiddenOffset : 0
-        let distance = target - resisted(drag)
-        let relative = abs(distance) > 1 ? velocity / distance : 0
-        let animation: Animation =
-            reduceMotion
-            ? .easeInOut(duration: 0.2)
-            : .interpolatingSpring(duration: 0.35, bounce: hide ? 0 : 0.15, initialVelocity: relative)
-        withAnimation(animation) {
-            hidden = hide
-            drag = 0
+    private func flash(_ text: String?, hold: Bool = false) {
+        statusTask?.cancel()
+        withAnimation(.easeOut(duration: 0.15)) { status = text }
+        guard text != nil, !hold else { return }
+        statusTask = Task {
+            try? await Task.sleep(for: .seconds(1.6))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.3)) { status = nil }
         }
+    }
+
+    private var modelStatus: String? {
+        switch model.core.modelState {
+        case .downloading(let f): "preparing covers \(Int(f * 100))%"
+        case .loading: "preparing covers"
+        default: model.nowPlaying?.isPlaying == false ? "|| paused" : nil
+        }
+    }
+
+    private var accessibilityTitle: String {
+        guard let np = model.nowPlaying else { return "Cover. Nothing playing" }
+        return "\(np.title) by \(np.artist), \(np.isPlaying ? "playing" : "paused")"
     }
 }
 
-/// Before a source is connected: pick one.
-private struct ConnectCard: View {
+/// Before a source is connected: pick one, in the same terminal style.
+private struct ConnectScreen: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 20) {
+            Spacer()
             VStack(alignment: .leading, spacing: 4) {
-                Text("Follow your music")
-                    .font(.title2.weight(.semibold))
-                    .tracking(-0.3)
-                Text("Covers from Spotify or Apple Music, in motion.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                Text("coverwave")
+                    .font(Term.font(22, .semibold))
+                    .foregroundStyle(Term.ink)
+                Text("follow your music. the cover moves with it.")
+                    .font(Term.font(13))
+                    .foregroundStyle(Term.dim)
             }
-            ForEach(SourceKind.allCases) { kind in
-                let source = model.source(kind)
-                let busy = model.activeKind == kind && source.status == .connecting
-                Button {
-                    model.choose(kind)
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: kind.symbol).frame(width: 24)
-                        Text(kind.name).font(.body.weight(.semibold))
-                        Spacer()
-                        if busy {
-                            ProgressView()
-                        } else {
-                            Image(systemName: "chevron.right")
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(SourceKind.allCases) { kind in
+                    let source = model.source(kind)
+                    let busy = model.activeKind == kind && source.status == .connecting
+                    let disabled = kind == .spotify && !model.spotify.isConfigured
+                    Button {
+                        model.choose(kind)
+                    } label: {
+                        HStack {
+                            Text("> \(kind.name.lowercased())")
+                                .font(Term.font(17, .medium))
+                                .foregroundStyle(disabled ? Term.faint : Term.ink)
+                            Spacer()
+                            if busy {
+                                Text("connecting...").font(Term.font(12)).foregroundStyle(.tint)
+                            }
                         }
+                        .frame(minHeight: 52)
                     }
-                    .padding(.horizontal, 16)
-                    .frame(height: 52)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.white.opacity(0.08)))
+                    .buttonStyle(TermRowStyle())
+                    .disabled(busy || disabled)
                 }
-                .buttonStyle(PressStyle(scale: 0.97))
-                .disabled(busy || (kind == .spotify && !model.spotify.isConfigured))
             }
-            if let kind = model.activeKind, let message = model.source(kind).status.message {
-                Label(message, systemImage: "info.circle")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            } else if !model.spotify.isConfigured, let message = model.spotify.status.message {
-                Text("Spotify: \(message)")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+            if let kind = model.activeKind, model.source(kind).status != .connecting,
+                let message = model.source(kind).status.message
+            {
+                Text("! " + message.lowercased())
+                    .font(Term.font(12))
+                    .foregroundStyle(Term.dim)
             }
         }
-        .foregroundStyle(.primary)
-        .padding(20)
-        .background(Panel())
+        .padding(.horizontal, 24)
+        .padding(.bottom, 32)
+        .frame(maxWidth: 560, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(alignment: .bottom) {
+            LinearGradient(colors: [Theme.page.opacity(0), Theme.page.opacity(0.9)], startPoint: .top, endPoint: .center)
+                .ignoresSafeArea()
+        }
     }
 }

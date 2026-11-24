@@ -361,7 +361,13 @@ fn draw_remote_library(f: &mut Frame, app: &mut App, area: Rect) {
     let accent = accent(app);
     let crumbs = app.remote_browser.breadcrumb().join(" / ");
     let title = match &app.remote_browser.filter {
+        Some(q) if app.remote_browser.at_root() => {
+            format!("Spotify / {crumbs}   / {q}_   enter searches all of Spotify")
+        }
         Some(q) => format!("Spotify / {crumbs}   / {q}_"),
+        None if app.remote_browser.at_root() => {
+            format!("Spotify / {crumbs}   / searches all of Spotify")
+        }
         None => format!("Spotify / {crumbs}"),
     };
     let block = panel(&title);
@@ -1085,10 +1091,19 @@ const KEYS: &[(&str, &str)] = &[
     ("up  down", "move in library (or j k)"),
     ("D", "debug overlay: stats, recipe, off"),
     ("R", "reload the cover's recipe"),
+    (ZOOM_OUT_KEY, "smaller font: finer, sharper art"),
     ("ctrl-l", "redraw the screen"),
     ("?", "close this help"),
     ("q", "quit"),
 ];
+
+/// The art fills the terminal, so a smaller terminal font means more
+/// characters per cover. Only the terminal app can change its font.
+const ZOOM_OUT_KEY: &str = if cfg!(target_os = "macos") {
+    "cmd -"
+} else {
+    "ctrl -"
+};
 
 fn draw_help(f: &mut Frame, main: Rect) {
     let lines: Vec<Line> = KEYS
