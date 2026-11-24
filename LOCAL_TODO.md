@@ -7,6 +7,10 @@ note anything that feels wrong; it can all be tuned.
 
 ## 0. Setup
 
+- [x] The workspace builds on macOS 27 with no warnings, all 118 tests pass,
+      clippy is clean, and `cw-tui` embeds its Info.plist with both
+      permission strings (checked 2026-11-24).
+
 - [ ] `cargo run -p cw-tui --release` once. It writes
       `~/.config/coverwave/config.toml` with comments.
 - [ ] Set `music_dirs` in that file to your music folders (default `~/Music`),
@@ -75,8 +79,9 @@ note anything that feels wrong; it can all be tuned.
       neon, embers, dust, fireflies, sway, shimmer, ambient).
 - [ ] With `D`: `fps` holds at 30/30 at full screen, and `changed` stays at
       about 15% or less.
-- [ ] `cargo bench -p cw-render --bench render` stays under 4ms
-      (0.5ms in the cloud).
+- [x] `cargo bench -p cw-render --bench render` stays under 4ms
+      (0.5ms in the cloud; on this Mac 0.30ms, or 0.92ms with the change
+      limiter, on 2026-11-24).
 - [ ] `m` turns motion off and on. Copy a recipe from
       `~/.cache/coverwave/recipes/<hash>.json` to
       `~/.config/coverwave/overrides/`, edit a layer, and press `R`.
