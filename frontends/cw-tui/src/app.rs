@@ -114,6 +114,12 @@ pub struct ArtCache {
 
 /// Frames over which a new recipe's motion fades in (1s at 30fps).
 pub const FADE_FRAMES: u32 = 30;
+/// Frames over which one cover dissolves into the next (about 0.4s).
+pub const DISSOLVE_FRAMES: u32 = 12;
+/// How quickly motion settles when playback pauses, and returns when it
+/// resumes (time constants in seconds; about 3x this to fully settle).
+const SETTLE_SECS: f32 = 0.25;
+const RESUME_SECS: f32 = 0.12;
 
 /// What the `D` overlay shows; `D` cycles through them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,6 +217,12 @@ pub struct App {
     /// The cover entry whose motion is fading in, and the frame it started.
     pub fade_entry: u64,
     pub fade_start: u32,
+    /// 0..1: how much motion is running. Eases to 0 while paused so the
+    /// art settles to still, and back to 1 on resume.
+    pub motion_level: f32,
+    /// The frame shown before a cover change and when the change began,
+    /// for the dissolve into the new cover.
+    pub dissolve: Option<(cw_core::CellGrid, u32)>,
     frame_times: VecDeque<Instant>,
 }
 
@@ -267,7 +279,41 @@ impl App {
             motion: settings.motion,
             fade_entry: 0,
             fade_start: 0,
+            motion_level: 1.0,
+            dissolve: None,
             frame_times: VecDeque::with_capacity(64),
+        }
+    }
+
+    /// Whether music is playing right now, locally or in the followed app.
+    pub fn is_playing(&self) -> bool {
+        if self.sources.is_remote() {
+            self.sources
+                .state
+                .as_ref()
+                .and_then(|s| s.now.as_ref())
+                .is_some_and(|n| n.playing)
+        } else {
+            self.snapshot
+                .as_ref()
+                .is_some_and(|s| s.status == cw_audio::Status::Playing)
+        }
+    }
+
+    /// Eases `motion_level` toward 1 while playing and 0 while paused, with
+    /// no overshoot (an exponential approach, like a critically damped
+    /// spring), so pausing settles the art instead of freezing it mid-move.
+    fn ease_motion_level(&mut self) {
+        let (target, tau) = if self.is_playing() {
+            (1.0, RESUME_SECS)
+        } else {
+            (0.0, SETTLE_SECS)
+        };
+        let dt = 1.0 / self.fps.max(1) as f32;
+        let k = 1.0 - (-dt / tau).exp();
+        self.motion_level += (target - self.motion_level) * k;
+        if (self.motion_level - target).abs() < 0.002 {
+            self.motion_level = target;
         }
     }
 
@@ -292,6 +338,7 @@ impl App {
         }
         self.model_was_ready = ready;
         self.update_cover();
+        self.ease_motion_level();
         self.poll_scan();
         self.track_listening();
     }
@@ -627,8 +674,18 @@ impl App {
             KeyCode::Char('D') => self.debug_page = self.debug_page.next(),
             KeyCode::Char('R') => self.reload_recipe(),
             KeyCode::Char('?') => self.show_help = !self.show_help,
-            KeyCode::Char('c') => self.art_style = self.art_style.next(),
-            KeyCode::Char('m') => self.motion = !self.motion,
+            KeyCode::Char('c') => {
+                self.art_style = self.art_style.next();
+                self.say(format!("art style: {}", self.art_style.name()));
+            }
+            KeyCode::Char('m') => {
+                self.motion = !self.motion;
+                self.say(if self.motion {
+                    "motion on"
+                } else {
+                    "motion off"
+                });
+            }
             _ => self.on_playback_key(key.code, shift),
         }
     }

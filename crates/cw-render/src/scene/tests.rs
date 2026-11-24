@@ -20,6 +20,23 @@ fn loud() -> AudioFrame {
     }
 }
 
+/// Loud with no beat in progress: the steady budget applies.
+fn loud_no_beat() -> AudioFrame {
+    AudioFrame {
+        onset: 0.0,
+        ..loud()
+    }
+}
+
+fn with_onset(onset: f32) -> AudioFrame {
+    AudioFrame {
+        bands: [0.5; 6],
+        level: 0.5,
+        onset,
+        onset_count: 1,
+    }
+}
+
 /// A warm disc (the subject) on a cool gradient sky.
 fn cover() -> (RgbImage, Palette) {
     let n = 96u32;
@@ -392,9 +409,10 @@ fn limiter_caps_audio_jumps_and_drops_weakest_first() {
         3,
     );
     let s = scene_for(&r, W, H);
-    // Silence then a full-scale hit: fog thickens and snow appears at once.
+    // Silence then a full-scale swell (no beat): fog thickens and snow
+    // appears at once.
     let prev = frame(&s, 10, &quiet());
-    let raw = frame(&s, 11, &loud());
+    let raw = frame(&s, 11, &loud_no_beat());
     let raw_changes = raw.grid.diff_count(&prev.grid);
     let limited = limit_changes(&s, &prev, raw.clone());
     let kept = limited.grid.diff_count(&prev.grid);
@@ -422,8 +440,8 @@ fn limiter_caps_audio_jumps_and_drops_weakest_first() {
         "kept {weakest_kept} > dropped {strongest_dropped}"
     );
     // Under budget, the limiter changes nothing.
-    let a = frame(&s, 20, &loud());
-    let b = frame(&s, 21, &loud());
+    let a = frame(&s, 20, &loud_no_beat());
+    let b = frame(&s, 21, &loud_no_beat());
     assert!(b.grid.diff_count(&a.grid) <= s.max_changes());
     assert_eq!(limit_changes(&s, &a, b.clone()), b);
 }
@@ -433,8 +451,80 @@ fn high_energy_covers_get_a_bigger_budget() {
     let calm = scene_for(&recipe(vec![], 0.2, 1), W, H);
     let wild = scene_for(&recipe(vec![], 1.0, 1), W, H);
     let cells = W as usize * H as usize;
-    assert_eq!(calm.max_changes(), (0.15 * cells as f32) as usize);
-    assert_eq!(wild.max_changes(), (0.30 * cells as f32) as usize);
+    assert_eq!(calm.max_changes(), (BUDGET * cells as f32) as usize);
+    assert_eq!(wild.max_changes(), (BUDGET_HIGH * cells as f32) as usize);
+}
+
+#[test]
+fn beats_widen_the_budget_and_decay_back() {
+    let s = scene_for(&recipe(vec![], 0.2, 1), W, H);
+    let cells = (W as usize * H as usize) as f32;
+    assert_eq!(s.max_changes_on_beat(0.0), s.max_changes());
+    assert_eq!(
+        s.max_changes_on_beat(1.0),
+        ((BUDGET + BEAT_BURST).min(BUDGET_MAX) * cells) as usize
+    );
+    let wild = scene_for(&recipe(vec![], 1.0, 1), W, H);
+    assert_eq!(wild.max_changes_on_beat(1.0), (BUDGET_MAX * cells) as usize);
+    // The limiter uses the beat budget of the frame it is limiting.
+    let r = recipe(
+        vec![Layer::Fog {
+            intensity: 0.9,
+            density: 0.9,
+            drift_deg: 0.0,
+            cycles: 1,
+        }],
+        0.2,
+        3,
+    );
+    let s = scene_for(&r, W, H);
+    let prev = frame(&s, 10, &quiet());
+    let hit = frame(&s, 11, &loud());
+    assert_eq!(hit.burst, 1.0);
+    let kept = limit_changes(&s, &prev, hit.clone())
+        .grid
+        .diff_count(&prev.grid);
+    assert!(kept <= s.max_changes_on_beat(1.0));
+    assert!(
+        kept > s.max_changes(),
+        "a beat should get past the steady budget"
+    );
+}
+
+#[test]
+fn beat_ring_starts_at_the_subject_and_expands() {
+    // No layers at all: only the beat ring can change anything.
+    let s = scene_for(&recipe(vec![], 0.3, 4), W, H);
+    let base = frame(&s, 0, &quiet()).grid;
+    assert_eq!(
+        frame(&s, 0, &with_onset(0.0)).grid,
+        base,
+        "silence draws no ring"
+    );
+    // Mean distance of brightened cells from the subject centre grows as the
+    // onset decays from the hit.
+    let spread = |onset: f32| {
+        let g = frame(&s, 0, &with_onset(onset)).grid;
+        let (mut sum, mut n) = (0.0, 0);
+        for y in 0..H {
+            for x in 0..W {
+                if g.get(x, y) != base.get(x, y) {
+                    assert!(!s.is_protected(x, y), "ring touched the subject");
+                    sum += ring_dist(s.origin, x as f32 + 0.5, y as f32 + 0.5);
+                    n += 1;
+                }
+            }
+        }
+        assert!(n > 0, "onset {onset} drew nothing");
+        sum / n as f32
+    };
+    let (early, mid, late) = (spread(0.9), spread(0.6), spread(0.3));
+    assert!(early < mid && mid < late, "{early} {mid} {late}");
+    // Pure: same input, same ring.
+    assert_eq!(
+        frame(&s, 5, &with_onset(0.6)),
+        frame(&s, 5, &with_onset(0.6))
+    );
 }
 
 #[test]

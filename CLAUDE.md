@@ -49,7 +49,9 @@ M0 (workspace + TUI shell), M1 (local playback), M2 (static ASCII album art), M3
   - Subject-mask cells and HUD cells never change.
   - Every animation loops seamlessly over `loop_frames` (integer `cycles`, phase-based).
   - Audio only modulates amplitude, never phase or speed.
-  - At most about 15% of cells change per frame (up to 30% for high-energy covers).
+  - A soft change budget keeps motion from turning into noise: about 25% of cells per frame steady (40% for high-energy covers), and beats may burst well past it (up to 75%), decaying with the beat. These are tuning values, not design rules: the owner wants lively, beat-driven motion (2026-11-24).
+  - Beats show as a ring of light that starts at the subject's edge and expands as the hit decays (`beat_ring` in `cw-render/src/scene.rs`). Keep beat effects spatial and anchored to the art, not full-screen flashes.
+  - Motion eases to still while playback is paused and back on resume (`App::motion_level`).
 - The audio callback thread never allocates or locks. It hands samples to other threads through a lock-free ring buffer (`rtrb`).
 
 ## Conventions

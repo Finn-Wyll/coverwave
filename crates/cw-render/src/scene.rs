@@ -20,11 +20,17 @@ use rand_chacha::ChaCha8Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
 use std::f32::consts::TAU;
 
-/// Changed-cell budget per frame, as a fraction of all cells.
-pub const BUDGET: f32 = 0.15;
-/// Budget for high-energy covers (energy 1.0); it rises linearly from
+/// Steady changed-cell budget per frame, as a fraction of all cells. A soft
+/// guide, not a design rule: it keeps motion from turning into noise.
+pub const BUDGET: f32 = 0.25;
+/// Steady budget for high-energy covers (energy 1.0); it rises linearly from
 /// [`BUDGET`] at energy 0.7.
-pub const BUDGET_HIGH: f32 = 0.30;
+pub const BUDGET_HIGH: f32 = 0.40;
+/// Extra budget at the instant of a beat (`onset` = 1). It decays with the
+/// onset envelope, so beats can burst well past the steady budget.
+pub const BEAT_BURST: f32 = 0.35;
+/// The budget never exceeds this, even on a beat.
+pub const BUDGET_MAX: f32 = 0.75;
 /// Cells per particle at density 1.0.
 const CELLS_PER_PARTICLE: f32 = 30.0;
 const MAX_PARTICLES: usize = 1500;
@@ -43,10 +49,12 @@ pub struct Input<'a> {
 
 /// A rendered frame plus which layer last wrote each cell (0 = base art,
 /// `k + 1` = layer `k`), which the change limiter uses for priority.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Output {
     pub grid: CellGrid,
     pub owner: Vec<u8>,
+    /// Beat strength this frame (0..1), which widens the change budget.
+    pub burst: f32,
 }
 
 /// A cover prepared for rendering at one size.
@@ -61,8 +69,17 @@ pub struct Scene {
     loop_frames: u32,
     layers: Vec<Prepared>,
     accent: Rgb,
+    /// Brightest palette colour, for beat highlights.
+    light: Rgb,
     background: Rgb,
     budget: f32,
+    /// Where beat rings start: the subject's centre, else the cover's, in
+    /// cells.
+    origin: (f32, f32),
+    /// Beat rings start at the subject's edge (its equivalent radius) and
+    /// reach this far (cells, with rows counted double).
+    ring_start: f32,
+    ring_reach: f32,
 }
 
 impl Scene {
@@ -78,9 +95,15 @@ impl Scene {
         self.loop_frames
     }
 
-    /// Maximum cells that may change per frame.
+    /// Maximum cells that may change per frame with no beat.
     pub fn max_changes(&self) -> usize {
-        (self.budget * self.base.cells().len() as f32).floor() as usize
+        self.max_changes_on_beat(0.0)
+    }
+
+    /// Maximum cells that may change per frame at beat strength `burst`.
+    pub fn max_changes_on_beat(&self, burst: f32) -> usize {
+        let frac = (self.budget + BEAT_BURST * burst.clamp(0.0, 1.0)).min(BUDGET_MAX);
+        (frac * self.base.cells().len() as f32).floor() as usize
     }
 
     pub fn is_protected(&self, x: u16, y: u16) -> bool {
@@ -258,6 +281,45 @@ pub fn prepare(recipe: &Recipe, base: CellGrid, art: Rect, ramp: &[char]) -> Sce
         })
         .collect();
 
+    // Beat rings start from the subject, so they read as coming from the
+    // art itself (Apple's "anchor motion to its source").
+    let (mut sx, mut sy, mut sn) = (0.0f32, 0.0f32, 0usize);
+    for (i, _) in protected.iter().enumerate().filter(|(_, p)| **p) {
+        sx += (i % w as usize) as f32 + 0.5;
+        sy += (i / w as usize) as f32 + 0.5;
+        sn += 1;
+    }
+    let origin = if sn > 0 {
+        (sx / sn as f32, sy / sn as f32)
+    } else {
+        (
+            art.x as f32 + art.w as f32 / 2.0,
+            art.y as f32 + art.h as f32 / 2.0,
+        )
+    };
+    let corners = [
+        (art.x as f32, art.y as f32),
+        ((art.x + art.w) as f32, art.y as f32),
+        (art.x as f32, (art.y + art.h) as f32),
+        ((art.x + art.w) as f32, (art.y + art.h) as f32),
+    ];
+    let ring_reach = corners
+        .iter()
+        .map(|&(x, y)| ring_dist(origin, x, y))
+        .fold(1.0f32, f32::max);
+    // Radius of a disc with the subject's area, in ring units (rows count
+    // double, so the area does too).
+    let ring_start = (2.0 * sn as f32 / std::f32::consts::PI)
+        .sqrt()
+        .min(ring_reach * 0.8);
+    let light = {
+        let lab = Lab::from(ctx.lightest());
+        Rgb::from(Lab {
+            l: lab.l.max(78.0),
+            ..lab
+        })
+    };
+
     Scene {
         base,
         art,
@@ -266,9 +328,20 @@ pub fn prepare(recipe: &Recipe, base: CellGrid, art: Rect, ramp: &[char]) -> Sce
         loop_frames: recipe.global.loop_frames.max(1),
         layers,
         accent,
+        light,
         background,
         budget,
+        origin,
+        ring_start,
+        ring_reach,
     }
+}
+
+/// Distance from `o` to cell position (x, y), counting rows double because
+/// terminal cells are about twice as tall as they are wide.
+fn ring_dist(o: (f32, f32), x: f32, y: f32) -> f32 {
+    let (dx, dy) = (x - o.0, 2.0 * (y - o.1));
+    (dx * dx + dy * dy).sqrt()
 }
 
 struct PrepCtx<'a> {
@@ -678,16 +751,26 @@ fn parse_hex(s: &str) -> Option<Rgb> {
     Some(Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
 }
 
-/// Audio gains: silence still moves, loud music moves more.
+/// Audio gains: silence still moves, loud music moves more, and every
+/// beat kicks the motion briefly on top (the onset envelope decays in about
+/// 150ms). Gains only scale amplitude, never phase, so loops stay seamless.
 fn gain_intensity(a: &AudioFrame) -> f32 {
-    0.7 + 0.6 * a.bass().clamp(0.0, 1.0)
+    0.8 + 0.9 * a.bass().clamp(0.0, 1.0) + 0.6 * beat(a)
 }
 fn gain_density(a: &AudioFrame) -> f32 {
-    0.6 + 0.8 * a.mid().clamp(0.0, 1.0)
+    0.5 + 1.0 * a.mid().clamp(0.0, 1.0) + 0.3 * beat(a)
 }
 fn gain_flicker(a: &AudioFrame) -> f32 {
-    0.4 + 0.6 * a.treble().clamp(0.0, 1.0)
+    0.3 + 0.9 * a.treble().clamp(0.0, 1.0)
 }
+fn beat(a: &AudioFrame) -> f32 {
+    a.onset.clamp(0.0, 1.0)
+}
+
+/// Ring width in cells (rows counted double), as a share of its reach.
+const RING_WIDTH: f32 = 0.14;
+/// Strongest tint a beat ring applies.
+const RING_TINT: f32 = 0.55;
 
 /// Renders one frame. Pure: no clocks, no global state.
 pub fn render(scene: &Scene, input: Input<'_>) -> Output {
@@ -697,10 +780,15 @@ pub fn render(scene: &Scene, input: Input<'_>) -> Output {
     let phase = (input.frame % l) as f32 / l as f32;
     let fade = input.fade.clamp(0.0, 1.0);
     let audio = input.audio;
+    let burst = beat(audio) * fade;
 
     // Displacement first (it resamples the base), then fields, then
     // particles on top. Weakest layers draw first so stronger ones win.
+    // The beat ring goes after the fields so particles still sit on top.
     for pass in 0..3 {
+        if pass == 2 {
+            beat_ring(scene, burst, &mut grid, &mut owner);
+        }
         for (k, layer) in scene.layers.iter().enumerate().rev() {
             let id = k as u8 + 1;
             let amp = layer.intensity * fade * gain_intensity(audio);
@@ -722,7 +810,42 @@ pub fn render(scene: &Scene, input: Input<'_>) -> Output {
             }
         }
     }
-    Output { grid, owner }
+    Output { grid, owner, burst }
+}
+
+/// On a beat, a soft ring of light travels outward from the subject: the
+/// onset envelope jumps to 1 and decays, so the ring starts at the
+/// subject's edge and expands as the hit fades. It only brightens existing
+/// glyphs, never the subject, and silence draws nothing.
+fn beat_ring(scene: &Scene, burst: f32, grid: &mut CellGrid, owner: &mut [u8]) {
+    if burst < 0.05 || scene.ring_reach <= 1.0 {
+        return;
+    }
+    let radius = scene.ring_start + (1.0 - burst) * (scene.ring_reach - scene.ring_start);
+    let half = (RING_WIDTH * scene.ring_reach).max(1.5);
+    let art = scene.art;
+    let w = scene.width() as usize;
+    // Rows the ring can touch, to skip most of the grid.
+    let reach_rows = (radius + half) / 2.0;
+    let y0 = (scene.origin.1 - reach_rows).floor().max(art.y as f32) as u16;
+    let y1 = ((scene.origin.1 + reach_rows).ceil() as u16).min(art.y + art.h);
+    for y in y0..y1 {
+        for x in art.x..art.x + art.w {
+            let d = ring_dist(scene.origin, x as f32 + 0.5, y as f32 + 0.5);
+            let edge = 1.0 - (d - radius).abs() / half;
+            if edge <= 0.0 {
+                continue;
+            }
+            let i = y as usize * w + x as usize;
+            let cell = grid.cells()[i];
+            if cell.ch == ' ' {
+                continue;
+            }
+            let fg = cell.fg.lerp(scene.light, RING_TINT * burst.sqrt() * edge);
+            // Owner 1: the beat outranks every layer in the change limiter.
+            set(scene, grid, owner, i, Cell { fg, ..cell }, 1);
+        }
+    }
 }
 
 fn set(scene: &Scene, grid: &mut CellGrid, owner: &mut [u8], i: usize, cell: Cell, id: u8) {
@@ -811,7 +934,7 @@ fn field(
             let row: Vec<f32> = (0..h)
                 .map(|y| (TAU * (y as f32 / 9.0 + *ky as f32 * phase) + phases[1]).sin())
                 .collect();
-            let threshold = 1.0 - 0.9 * density * amp.min(1.2);
+            let threshold = 1.0 - 0.9 * density * amp.min(1.8);
             for (y, ry) in row.iter().enumerate() {
                 for (x, cx) in col.iter().enumerate() {
                     let v = 0.5 + 0.3 * cx + 0.2 * ry;
@@ -847,7 +970,7 @@ fn field(
                 })
                 .collect();
             let n = colors.len().max(1);
-            let mix = (0.35 * amp).min(0.5);
+            let mix = (0.35 * amp).min(0.6);
             for (yi, y) in (art.y..art.y + art.h).enumerate() {
                 for (xi, x) in (art.x..art.x + art.w).enumerate() {
                     let i = y as usize * w + x as usize;
@@ -882,7 +1005,7 @@ fn field(
                 for y in y0..y1 {
                     let fall = 1.0 - ((y as f32 + 0.5 - cy).abs() / (half + 0.5));
                     for (xi, x) in (art.x..art.x + art.w).enumerate() {
-                        let v = col[xi] * fall * amp.min(1.2);
+                        let v = col[xi] * fall * amp.min(1.8);
                         if v < 1.0 - softness {
                             continue;
                         }
@@ -935,7 +1058,7 @@ fn field(
         }
         Field::Ambient { cycles, wavelength } => {
             let art = scene.art;
-            let mix = 0.12 * amp.min(1.2);
+            let mix = 0.12 * amp.min(2.0);
             for y in art.y..art.y + art.h {
                 for x in art.x..art.x + art.w {
                     let i = y as usize * w + x as usize;
@@ -1029,12 +1152,12 @@ fn particles(
     }
 }
 
-/// Keeps at most `scene.max_changes()` cells different from `prev`,
-/// reverting the changes of the weakest layers first (highest owner id;
-/// a cell going back to the base art counts as its previous owner). Ties
-/// break by cell index, so the result is deterministic.
+/// Keeps at most `scene.max_changes_on_beat(next.burst)` cells different
+/// from `prev`, reverting the changes of the weakest layers first (highest
+/// owner id; a cell going back to the base art counts as its previous
+/// owner). Ties break by cell index, so the result is deterministic.
 pub fn limit_changes(scene: &Scene, prev: &Output, next: Output) -> Output {
-    let max = scene.max_changes();
+    let max = scene.max_changes_on_beat(next.burst);
     if prev.grid.width() != next.grid.width() || prev.grid.height() != next.grid.height() {
         return next;
     }

@@ -1,4 +1,4 @@
-use crate::app::{App, ArtCache, ColorMode, DebugPage, FADE_FRAMES, Mode};
+use crate::app::{App, ArtCache, ColorMode, DISSOLVE_FRAMES, DebugPage, FADE_FRAMES, Mode};
 use crate::cover::Slot;
 use cw_audio::{Status, Track};
 use cw_core::{CellGrid, Repeat, Rgb, ansi256};
@@ -171,6 +171,9 @@ fn draw_art(f: &mut Frame, app: &mut App, area: Rect) {
                 if app.fade_entry != entry.id {
                     app.fade_entry = entry.id;
                     app.fade_start = app.frame;
+                    // Dissolve from whatever was on screen (the last cover
+                    // or the idle scene) instead of hard-cutting.
+                    app.dissolve = app.prev_art.clone().map(|g| (g, app.frame));
                 }
                 app.prev_out = None;
                 app.art_cache = Some(ArtCache {
@@ -188,7 +191,9 @@ fn draw_art(f: &mut Frame, app: &mut App, area: Rect) {
                 Some(c) if !app.motion => c.base.clone(),
                 Some(c) => {
                     let age = app.frame.wrapping_sub(app.fade_start);
-                    let fade = (age as f32 / FADE_FRAMES as f32).min(1.0);
+                    let t = (age as f32 / FADE_FRAMES as f32).min(1.0);
+                    // Eased fade-in, times the pause/resume settle level.
+                    let fade = t * t * (3.0 - 2.0 * t) * app.motion_level;
                     let input = cw_render::Input {
                         frame: app.frame,
                         audio: &app.audio,
@@ -213,6 +218,18 @@ fn draw_art(f: &mut Frame, app: &mut App, area: Rect) {
             app.idle_seed,
             IdleStyle::default(),
         ),
+    };
+    let grid = match &app.dissolve {
+        Some((from, start)) => {
+            let age = app.frame.wrapping_sub(*start);
+            if age < DISSOLVE_FRAMES {
+                cw_render::dissolve(from, &grid, age as f32 / DISSOLVE_FRAMES as f32)
+            } else {
+                app.dissolve = None;
+                grid
+            }
+        }
+        None => grid,
     };
     let total = (grid.width() as usize * grid.height() as usize).max(1);
     app.last_change_pct = match &app.prev_art {

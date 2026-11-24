@@ -142,6 +142,27 @@ pub fn idle(
     grid
 }
 
+/// Dissolves `from` into `to`: at `t` = 0 every cell shows `from`, at 1
+/// every cell shows `to`, and in between each cell switches at its own
+/// (fixed, hash-scattered) moment on an eased curve. Pure. Grids of
+/// different sizes return `to`.
+pub fn dissolve(from: &CellGrid, to: &CellGrid, t: f32) -> CellGrid {
+    if from.width() != to.width() || from.height() != to.height() {
+        return to.clone();
+    }
+    let t = t.clamp(0.0, 1.0);
+    let eased = t * t * (3.0 - 2.0 * t); // smoothstep: soft start and end
+    let mut out = to.clone();
+    let w = to.width() as usize;
+    for (i, cell) in from.cells().iter().enumerate() {
+        let threshold = (splitmix64(i as u64 ^ 0xD15_501F) >> 40) as f32 / (1u64 << 24) as f32;
+        if threshold >= eased {
+            out.set((i % w) as u16, (i / w) as u16, *cell);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +223,36 @@ mod tests {
             let g = idle(w, h, 5, DEFAULT_LOOP_FRAMES, SEED, IdleStyle::default());
             assert_eq!((g.width(), g.height()), (w, h));
         }
+    }
+
+    #[test]
+    fn dissolve_goes_from_old_to_new() {
+        let a = idle(40, 12, 0, DEFAULT_LOOP_FRAMES, 1, IdleStyle::default());
+        let mut b = CellGrid::new(40, 12);
+        for y in 0..12 {
+            for x in 0..40 {
+                b.set(
+                    x,
+                    y,
+                    Cell {
+                        ch: '#',
+                        fg: Rgb(9, 9, 9),
+                        bg: None,
+                    },
+                );
+            }
+        }
+        assert_eq!(dissolve(&a, &b, 0.0), a);
+        assert_eq!(dissolve(&a, &b, 1.0), b);
+        let half = dissolve(&a, &b, 0.5);
+        let from_b = half.diff_count(&a);
+        assert!(
+            from_b > 120 && from_b < 360,
+            "{from_b} of 480 switched at t=0.5"
+        );
+        // Monotonic: a cell that has switched stays switched.
+        let later = dissolve(&a, &b, 0.7);
+        assert!(later.diff_count(&a) >= from_b);
+        assert_eq!(dissolve(&a, &CellGrid::new(3, 3), 0.5), CellGrid::new(3, 3));
     }
 }

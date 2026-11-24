@@ -82,7 +82,7 @@ note anything that feels wrong; it can all be tuned.
       that feels too busy (snow, rain, fog, ripple, heat, clouds, flicker,
       neon, embers, dust, fireflies, sway, shimmer, ambient).
 - [ ] With `D`: `fps` holds at 30/30 at full screen, and `changed` stays at
-      about 15% or less.
+      about 25% or less between beats (beats may briefly go higher).
 - [x] `cargo bench -p cw-render --bench render` stays under 4ms
       (0.5ms in the cloud; on this Mac 0.30ms, or 0.92ms with the change
       limiter, on 2026-11-24).
