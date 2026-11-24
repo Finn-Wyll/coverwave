@@ -326,6 +326,18 @@ impl GenreFamily {
         }
     }
 
+    /// The rhythm the beat clock plays for this family.
+    pub fn beat_pattern(self) -> cw_core::BeatPattern {
+        use cw_core::BeatPattern::*;
+        match self {
+            GenreFamily::Electronic => FourOnFloor,
+            GenreFamily::HipHop | GenreFamily::RnbSoul => HalfTime,
+            GenreFamily::Reggae => OneDrop,
+            GenreFamily::Ambient | GenreFamily::Classical | GenreFamily::Soundtrack => Swell,
+            _ => BackBeat,
+        }
+    }
+
     /// A plausible tempo when the real one is unknown (beat clock).
     pub fn typical_bpm(self) -> f32 {
         match self {

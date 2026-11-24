@@ -269,6 +269,7 @@ fn parse_player_full(json: &str) -> Result<Option<(NowPlaying, Option<String>)>,
             art,
             genre: None,
             isrc,
+            bpm: None,
         },
         artist_id,
     )))

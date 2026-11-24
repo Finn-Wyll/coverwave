@@ -766,6 +766,7 @@ dependencies = [
 name = "cw-sources"
 version = "0.1.0"
 dependencies = [
+ "cw-audio",
  "getrandom 0.3.4",
  "keyring",
  "serde",

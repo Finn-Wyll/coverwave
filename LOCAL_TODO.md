@@ -183,6 +183,11 @@ Spotify server.
       in `crates/cw-render/src/scene/extra.rs`.
 - [ ] Spotify: genre comes from the artist; Apple Music: from the track.
       Check that the recipe page shows a genre for both.
+- [ ] **Beat clock:** set `[capture] enabled = false`, play Spotify and
+      press `D`. `tempo` shows the looked-up BPM, and the cover pulses in
+      time with the song. Tell me about any songs where it is clearly off,
+      for example at double or half speed. Quick check without the app:
+      `cargo run -p cw-sources --release --example tempo_lookup -- "Artist" "Title"`.
 
 ## M8: Windows and CI (optional)
 

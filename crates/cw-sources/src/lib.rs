@@ -10,6 +10,8 @@
 pub mod apple_music;
 #[cfg(feature = "http")]
 pub mod spotify;
+#[cfg(feature = "http")]
+pub mod tempo;
 mod util;
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
@@ -43,6 +45,8 @@ pub struct NowPlaying {
     pub genre: Option<String>,
     /// International Standard Recording Code, for tempo lookups.
     pub isrc: Option<String>,
+    /// Tempo, once looked up (see `tempo`); filled in by [`RemoteHandle`].
+    pub bpm: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,7 +130,14 @@ pub struct RemoteHandle {
 }
 
 impl RemoteHandle {
-    pub fn spawn(mut backend: Box<dyn Backend>) -> RemoteHandle {
+    pub fn spawn(backend: Box<dyn Backend>) -> RemoteHandle {
+        Self::spawn_with(backend, false)
+    }
+
+    /// Like [`spawn`](Self::spawn); with `tempo_lookup`, each new track's
+    /// tempo is looked up once in the background (see `tempo`) and
+    /// reported in `NowPlaying::bpm`.
+    pub fn spawn_with(mut backend: Box<dyn Backend>, tempo_lookup: bool) -> RemoteHandle {
         let name = backend.name();
         let state = Arc::new(Mutex::new(RemoteState {
             now: None,
@@ -136,6 +147,9 @@ impl RemoteHandle {
         }));
         let (tx, rx): (Sender<Command>, Receiver<Command>) = channel();
         let shared = state.clone();
+        // Track ID -> tempo (None: looked up, nothing found). Filled by
+        // short-lived lookup threads so polling never waits on the network.
+        let tempos: Arc<Mutex<std::collections::HashMap<String, Option<f32>>>> = Arc::default();
         let _ = std::thread::Builder::new()
             .name(format!("cw-source-{name}"))
             .spawn(move || {
@@ -156,7 +170,18 @@ impl RemoteHandle {
                     }
                 };
                 loop {
-                    let r = backend.poll();
+                    let mut r = backend.poll();
+                    if let Ok(Some(now)) = r.as_mut() {
+                        let mut known = tempos.lock().unwrap_or_else(|e| e.into_inner());
+                        match known.get(&now.track_id) {
+                            Some(bpm) => now.bpm = *bpm,
+                            None if tempo_lookup => {
+                                known.insert(now.track_id.clone(), None);
+                                spawn_tempo_lookup(now.clone(), tempos.clone());
+                            }
+                            None => {}
+                        }
+                    }
                     publish(backend.as_ref(), r);
                     match rx.recv_timeout(backend.poll_interval()) {
                         Ok(cmd) => {
@@ -186,6 +211,28 @@ impl RemoteHandle {
     pub fn send(&self, c: Command) {
         let _ = self.commands.send(c);
     }
+}
+
+#[cfg(feature = "http")]
+fn spawn_tempo_lookup(
+    now: NowPlaying,
+    out: Arc<Mutex<std::collections::HashMap<String, Option<f32>>>>,
+) {
+    let _ = std::thread::Builder::new()
+        .name("cw-tempo".into())
+        .spawn(move || {
+            let bpm = tempo::lookup(&now);
+            out.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(now.track_id, bpm);
+        });
+}
+
+#[cfg(not(feature = "http"))]
+fn spawn_tempo_lookup(
+    _now: NowPlaying,
+    _out: Arc<Mutex<std::collections::HashMap<String, Option<f32>>>>,
+) {
 }
 
 /// Fetches cover bytes (blocking; call off the UI thread).
@@ -226,6 +273,7 @@ mod tests {
                 art: ArtRef::None,
                 genre: None,
                 isrc: None,
+                bpm: None,
             }))
         }
         fn command(&mut self, c: &Command) -> Result<(), SourceError> {

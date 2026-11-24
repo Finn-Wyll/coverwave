@@ -737,6 +737,10 @@ fn draw_debug(f: &mut Frame, app: &App, main: Rect) {
             "capture {}",
             fit(&app.sources.capture_description(), 20)
         )));
+        lines.push(Line::from(format!(
+            "tempo   {}",
+            fit(&app.sources.tempo_description(app.current_genre()), 20)
+        )));
     }
     if let Some(c) = &app.shown_cover {
         let mut swatches = vec![Span::raw("palette ")];

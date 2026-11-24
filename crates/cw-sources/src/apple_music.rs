@@ -74,6 +74,7 @@ pub fn parse_state(out: &str) -> Result<Option<NowPlaying>, SourceError> {
         art: ArtRef::None,
         genre: f.get(8).and_then(|g| text(g)),
         isrc: None,
+        bpm: None,
     }))
 }
 

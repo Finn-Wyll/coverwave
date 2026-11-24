@@ -5,11 +5,13 @@
 
 pub mod art;
 pub mod audio;
+pub mod beat;
 pub mod color;
 pub mod queue;
 pub mod recipe;
 pub use art::{ArtStyle, Palette, RgbImage};
 pub use audio::{AudioFrame, BAND_COUNT};
+pub use beat::{BeatClock, BeatPattern};
 pub use color::{Lab, ansi256};
 pub use queue::{Queue, Repeat};
 pub use recipe::{Layer, Recipe};

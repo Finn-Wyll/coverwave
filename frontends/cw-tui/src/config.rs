@@ -27,6 +27,23 @@ pub struct Config {
     pub lyrics: Lyrics,
     pub spotify: Spotify,
     pub capture: Capture,
+    pub tempo: Tempo,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Tempo {
+    /// Look up a remote track's tempo on Deezer (sends artist, title or
+    /// ISRC) so the beat clock matches the song when audio is not captured.
+    pub online_lookup: bool,
+}
+
+impl Default for Tempo {
+    fn default() -> Self {
+        Tempo {
+            online_lookup: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -83,6 +100,7 @@ impl Default for Config {
             lyrics: Lyrics::default(),
             spotify: Spotify::default(),
             capture: Capture::default(),
+            tempo: Tempo::default(),
         }
     }
 }
@@ -142,6 +160,12 @@ redirect_port = 8898
 [capture]
 # Listen to Spotify / Apple Music so their covers react to the music.
 enabled = true
+
+[tempo]
+# When a remote track's audio cannot be captured, the cover moves to a beat
+# clock. true: look up the track's tempo on Deezer (sends only its artist,
+# title or ISRC). false: use a typical tempo for the genre.
+online_lookup = true
 "#;
 
 #[cfg(test)]

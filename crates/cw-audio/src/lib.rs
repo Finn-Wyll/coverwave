@@ -14,7 +14,7 @@ mod info;
 mod player;
 mod reader;
 
-pub use analysis::{Analyser, AnalyserHandle};
+pub use analysis::{Analyser, AnalyserHandle, TempoEstimate, estimate_tempo};
 pub use info::{AUDIO_EXTENSIONS, Track, TrackInfo, collect_audio_files, cover_art, is_audio_file};
 pub use player::{Player, Snapshot, Status};
 
@@ -65,6 +65,23 @@ pub fn analyse_file(
             analyser.push(&chunk[take..]);
             since += chunk.len() - take;
         }
+        if !more {
+            return Ok(out);
+        }
+    }
+}
+
+/// Decodes a whole file to mono at `out_rate` (for tempo estimation).
+pub fn decode_mono(path: &std::path::Path, out_rate: u32) -> Result<Vec<f32>, AudioError> {
+    let mut reader = reader::TrackReader::open(path, out_rate)?;
+    let (mut buf, mut out) = (Vec::new(), Vec::new());
+    loop {
+        let more = reader.read_into(&mut buf)?;
+        out.extend(
+            buf.chunks(reader::OUT_CHANNELS)
+                .map(|f| f.iter().sum::<f32>() * 0.5),
+        );
+        buf.clear();
         if !more {
             return Ok(out);
         }

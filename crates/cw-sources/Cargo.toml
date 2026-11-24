@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+cw-audio = { workspace = true, optional = true }
 getrandom = "0.3"
 keyring = "3.6"
 serde = { version = "1", features = ["derive"] }
@@ -19,7 +20,7 @@ ureq = { version = "3.5", features = ["platform-verifier"], optional = true }
 # type-check the macOS/Windows code from Linux, where TLS crypto needs the
 # target's C toolchain: cargo check -p cw-sources --no-default-features --target aarch64-apple-darwin
 default = ["http"]
-http = ["dep:ureq"]
+http = ["dep:ureq", "dep:cw-audio"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6", features = ["apple-native"] }

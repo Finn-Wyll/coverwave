@@ -73,6 +73,8 @@ pub struct Analyser {
     hops_since_onset: u32,
     min_gap_hops: u32,
     frame: AudioFrame,
+    /// When set, every hop's onset flux is recorded (tempo estimation).
+    flux_trace: Option<Vec<f32>>,
 }
 
 impl Analyser {
@@ -116,6 +118,7 @@ impl Analyser {
             hops_since_onset: u32::MAX,
             min_gap_hops: (MIN_ONSET_GAP_SECS / dt).ceil() as u32,
             frame: AudioFrame::default(),
+            flux_trace: None,
         }
     }
 
@@ -235,6 +238,9 @@ impl Analyser {
         self.flux[self.flux_pos] = flux;
         self.flux_pos = (self.flux_pos + 1) % self.flux.len();
         self.flux_prev = [flux, p1];
+        if let Some(t) = self.flux_trace.as_mut() {
+            t.push(flux);
+        }
 
         // Smooth.
         let attack = 1.0 - (-self.dt / ATTACK_SECS).exp();
@@ -254,6 +260,86 @@ impl Analyser {
             f.onset_count += 1;
         }
     }
+}
+
+/// A tempo estimate from a stretch of audio.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TempoEstimate {
+    pub bpm: f32,
+    /// 0..1: how clearly periodic the onsets were.
+    pub confidence: f32,
+}
+
+/// Estimates the tempo of mono `samples` (a whole clip, e.g. a 30-second
+/// preview): spectral-flux onsets, autocorrelated over 60..200 BPM with a
+/// mild preference for tempos near 120 (a log-normal prior, as usual in beat
+/// tracking). `None` for clips too short or without a clear pulse.
+pub fn estimate_tempo(samples: &[f32], sample_rate: u32) -> Option<TempoEstimate> {
+    let mut a = Analyser::new(sample_rate);
+    a.flux_trace = Some(Vec::new());
+    a.push(samples);
+    let flux = a.flux_trace.take().unwrap_or_default();
+    let hop_secs = HOP as f32 / sample_rate.max(1) as f32;
+    if flux.len() as f32 * hop_secs < 6.0 {
+        return None;
+    }
+    let mean = flux.iter().sum::<f32>() / flux.len() as f32;
+    let raw: Vec<f32> = flux.iter().map(|f| (f - mean).max(0.0)).collect();
+    // Smooth over a few hops so beat periods that fall between whole hops
+    // (150 BPM is 37.5 hops at 48 kHz) are not penalised against their
+    // whole-hop sub-harmonics.
+    const K: [f32; 5] = [0.1, 0.2, 0.4, 0.2, 0.1];
+    let x: Vec<f32> = (0..raw.len())
+        .map(|i| {
+            K.iter()
+                .enumerate()
+                .map(|(k, w)| w * raw.get((i + k).wrapping_sub(2)).copied().unwrap_or(0.0))
+                .sum()
+        })
+        .collect();
+    let energy: f32 = x.iter().map(|v| v * v).sum();
+    if energy <= 1e-9 {
+        return None;
+    }
+    let lag_for = |bpm: f32| 60.0 / bpm / hop_secs;
+    let (lo, hi) = (
+        lag_for(200.0).floor() as usize,
+        lag_for(60.0).ceil() as usize,
+    );
+    let ac = |lag: usize| -> f32 {
+        x.iter()
+            .zip(&x[lag.min(x.len())..])
+            .map(|(a, b)| a * b)
+            .sum()
+    };
+    let mut best = (0.0f32, 0usize);
+    for lag in lo.max(1)..=hi.min(x.len() / 2) {
+        // Reward lags whose double also correlates (a real beat repeats).
+        let score = ac(lag) + 0.5 * ac(2 * lag);
+        let bpm = 60.0 / (lag as f32 * hop_secs);
+        let prior = (-0.5 * ((bpm / 120.0).log2() / 0.9).powi(2)).exp();
+        let s = score * prior;
+        if s > best.0 {
+            best = (s, lag);
+        }
+    }
+    let lag = best.1;
+    if lag == 0 {
+        return None;
+    }
+    // Parabolic refinement of the peak for sub-hop precision.
+    let (y0, y1, y2) = (ac(lag - 1), ac(lag), ac(lag + 1));
+    let denom = y0 - 2.0 * y1 + y2;
+    let shift = if denom.abs() > 1e-9 {
+        (0.5 * (y0 - y2) / denom).clamp(-0.5, 0.5)
+    } else {
+        0.0
+    };
+    let bpm = 60.0 / ((lag as f32 + shift) * hop_secs);
+    Some(TempoEstimate {
+        bpm: (bpm * 10.0).round() / 10.0,
+        confidence: (y1 / energy).clamp(0.0, 1.0),
+    })
 }
 
 /// How often the analyser thread wakes to drain its input.
@@ -454,6 +540,39 @@ mod tests {
         }
         assert!(h.frame().bands[1] > 0.5, "{:?}", h.frame());
         drop(tx);
+    }
+
+    fn clicks(bpm: f32, secs: f32) -> Vec<f32> {
+        let n = (secs * RATE as f32) as usize;
+        let period = 60.0 / bpm * RATE as f32;
+        let burst = noise(0.6, 0.02, 3);
+        let mut s = noise(0.01, secs, 4);
+        let mut t = 0.0;
+        while (t as usize) < n {
+            for (i, b) in burst.iter().enumerate() {
+                if let Some(x) = s.get_mut(t as usize + i) {
+                    *x += b;
+                }
+            }
+            t += period;
+        }
+        s
+    }
+
+    #[test]
+    fn tempo_of_click_tracks() {
+        for bpm in [72.0, 100.0, 128.0, 150.0, 174.0] {
+            let est = estimate_tempo(&clicks(bpm, 30.0), RATE).unwrap();
+            // Up to 160 BPM the octave must be right. Faster tempos may read
+            // as half-time (174 drum and bass is often felt and listed as 87),
+            // which also suits the restrained motion.
+            let ok =
+                (est.bpm - bpm).abs() <= 2.0 || (bpm > 160.0 && (est.bpm - bpm / 2.0).abs() <= 1.5);
+            assert!(ok, "{bpm} -> {est:?}");
+            assert!(est.confidence > 0.1, "{est:?}");
+        }
+        assert_eq!(estimate_tempo(&vec![0.0; RATE as usize * 10], RATE), None);
+        assert_eq!(estimate_tempo(&clicks(120.0, 3.0), RATE), None, "too short");
     }
 
     #[test]

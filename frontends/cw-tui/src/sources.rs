@@ -4,8 +4,9 @@
 //! the cover still reacts to the music.
 
 use crate::config::Config;
+use cw_analysis::GenreFamily;
 use cw_capture::{Capture, CaptureError, Target};
-use cw_core::AudioFrame;
+use cw_core::{AudioFrame, BeatClock};
 use cw_sources::{Command, RemoteHandle, RemoteState};
 use std::time::{Duration, Instant};
 
@@ -58,6 +59,8 @@ pub struct Sources {
     /// The active remote's state, refreshed each tick.
     pub state: Option<RemoteState>,
     capture_enabled: bool,
+    /// Look up remote tracks' tempo online (Deezer) for the beat clock.
+    tempo_lookup: bool,
     capture: Option<Running>,
     /// Why capture is not running (shown in the debug overlay).
     pub capture_status: String,
@@ -94,6 +97,7 @@ impl Sources {
             remotes: Vec::new(),
             state: None,
             capture_enabled: config.capture.enabled,
+            tempo_lookup: config.tempo.online_lookup,
             capture: None,
             capture_status: String::new(),
             next_try: Instant::now(),
@@ -144,7 +148,8 @@ impl Sources {
                 }
                 _ => Box::new(cw_sources::apple_music::AppleMusic::new()),
             };
-            self.remotes.push((kind, RemoteHandle::spawn(backend)));
+            self.remotes
+                .push((kind, RemoteHandle::spawn_with(backend, self.tempo_lookup)));
         }
     }
 
@@ -222,6 +227,32 @@ impl Sources {
     /// Analysis of the captured audio, when capturing.
     pub fn audio_frame(&self) -> Option<AudioFrame> {
         self.capture.as_ref().map(|r| r.analyser.frame())
+    }
+
+    /// Synthetic motion for a remote track that cannot be heard: a beat
+    /// clock at the track's tempo (looked up online), or the genre's typical
+    /// tempo, with the genre's rhythm.
+    pub fn beat_frame(&self, genre: GenreFamily) -> Option<AudioFrame> {
+        let state = self.state.as_ref()?;
+        let now = state.now.as_ref()?;
+        let bpm = now.bpm.unwrap_or_else(|| genre.typical_bpm());
+        let energy = (0.5 + genre.energy_bias()).clamp(0.0, 1.0);
+        let clock = BeatClock::new(bpm, genre.beat_pattern(), energy);
+        Some(clock.frame(state.position_now(Instant::now()), now.playing))
+    }
+
+    /// Where the motion comes from, for the debug overlay.
+    pub fn tempo_description(&self, genre: GenreFamily) -> String {
+        if self.capture.is_some() {
+            return "heard".into();
+        }
+        match self.state.as_ref().and_then(|s| s.now.as_ref()) {
+            None => "-".into(),
+            Some(n) => match n.bpm {
+                Some(b) => format!("{b:.0} BPM (looked up)"),
+                None => format!("{:.0} BPM ({})", genre.typical_bpm(), genre.name()),
+            },
+        }
     }
 
     pub fn capture_description(&self) -> String {

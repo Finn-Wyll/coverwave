@@ -277,9 +277,15 @@ impl App {
         self.snapshot = self.player.as_ref().map(Player::snapshot);
         self.sources.tick();
         self.audio = if self.sources.is_remote() {
-            // A remote player's audio comes from system capture (silence,
-            // and gentle default motion, until capture is running).
-            self.sources.audio_frame().unwrap_or_default()
+            // A remote player's audio comes from system capture; until (or
+            // unless) that runs, a beat clock at the track's tempo stands in.
+            match self.sources.audio_frame() {
+                Some(f) => f,
+                None => self
+                    .sources
+                    .beat_frame(self.current_genre())
+                    .unwrap_or_default(),
+            }
         } else {
             self.player
                 .as_ref()

@@ -287,6 +287,15 @@ trait SystemCapture { fn start(&mut self, sink: Producer<f32>) -> Result<()>; fn
 - **Apple Music:** `osascript` with a tab-separated state line (decimal commas handled), and artwork exported to a temp file once per track. Automation permission errors (-1743) get a hint. UNTESTED on a Mac.
 - **Folder watching** (`notify`): not yet.
 
+*Beat clock (after M8, for audio that cannot be heard):*
+- When capture is not running, a remote track's motion comes from `cw_core::BeatClock`. It is a pure function of tempo, a `BeatPattern` and the playback position. The pattern comes from the genre family: four-on-the-floor for electronic, half-time for hip-hop and R&B, one-drop for reggae, swells for ambient, classical and soundtracks, and a backbeat for everything else. Kicks drive the bass bands and the onsets, snares the mids, and hats the treble. It follows seeks because it reads the position.
+- **Tempo:** `cw_sources::tempo` looks the track up on Deezer's public API, which needs no key. It searches by ISRC, or else by artist and title. Deezer's `bpm` is used when it is set, but it is usually 0. Otherwise the 30-second preview MP3 is downloaded and analysed with `cw_audio::estimate_tempo`:
+  - The method is spectral flux, autocorrelation over 60–200 BPM and a prior centred on 120 BPM.
+  - Estimates with confidence below 0.3 are dropped.
+  - Live checks: One More Time 122.9 and Enter Sandman 124.5 (both correct). Some tracks come out at double or half time.
+- The lookup runs once per track on a background thread. Without a tempo, the genre's typical BPM is used. `[tempo] online_lookup = false` turns the lookup off; it only ever sends artist, title or ISRC.
+- Why not something else: Spotify's audio-features and audio-analysis endpoints return 403 for apps created after Nov 2024. AcousticBrainz is frozen. The iTunes preview terms forbid non-promotional use. On iOS, other apps' audio cannot be captured, so this is also the iOS motion source.
+
 ## 10. Library, queue, playlists, lyrics (`cw-library`)
 
 - SQLite at `~/.local/share/coverwave/library.db`: tracks, albums, artists, cover_hash, play counts.
@@ -363,6 +372,8 @@ change_budget = 0.15
 client_id = ""
 [lyrics]
 online_lookup = false
+[tempo]
+online_lookup = true    # beat-clock tempo from Deezer for remote tracks
 ```
 
 ---
