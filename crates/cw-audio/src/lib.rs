@@ -9,15 +9,25 @@
 //! - the **UI thread** holds a [`Player`] handle, sends commands and reads a
 //!   [`Snapshot`] each frame.
 
+//!
+//! Without the default `playback` feature only the analyser and the tempo
+//! estimator are built (no device, no decoding), for the iOS core.
+
 mod analysis;
+#[cfg(feature = "playback")]
 mod info;
+#[cfg(feature = "playback")]
 mod player;
+#[cfg(feature = "playback")]
 mod reader;
 
 pub use analysis::{Analyser, AnalyserHandle, TempoEstimate, estimate_tempo};
+#[cfg(feature = "playback")]
 pub use info::{AUDIO_EXTENSIONS, Track, TrackInfo, collect_audio_files, cover_art, is_audio_file};
+#[cfg(feature = "playback")]
 pub use player::{Player, Snapshot, Status};
 
+#[cfg(feature = "playback")]
 /// Decodes a whole file at `out_rate` without playing it and returns the
 /// number of stereo frames produced. For diagnostics and tests.
 pub fn decode_to_end(path: &std::path::Path, out_rate: u32) -> Result<u64, AudioError> {
@@ -32,6 +42,7 @@ pub fn decode_to_end(path: &std::path::Path, out_rate: u32) -> Result<u64, Audio
     Ok(frames)
 }
 
+#[cfg(feature = "playback")]
 /// Decodes a whole file at `out_rate` and runs the analyser over it exactly
 /// as playback would (mono mix, pre-volume), returning one [`AudioFrame`]
 /// every `every_frames` output frames. For diagnostics and tuning.
@@ -71,6 +82,7 @@ pub fn analyse_file(
     }
 }
 
+#[cfg(feature = "playback")]
 /// Decodes a whole file to mono at `out_rate` (for tempo estimation).
 pub fn decode_mono(path: &std::path::Path, out_rate: u32) -> Result<Vec<f32>, AudioError> {
     let mut reader = reader::TrackReader::open(path, out_rate)?;

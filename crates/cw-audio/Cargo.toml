@@ -5,13 +5,31 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Decoding, resampling and device playback. Without it only the analyser
+# and tempo estimator remain (pure Rust; used by the iOS core).
+default = ["playback"]
+playback = ["dep:audioadapter-buffers", "dep:cpal", "dep:lofty", "dep:rubato", "dep:symphonia"]
+
 [dependencies]
-audioadapter-buffers = "5.1"
-cpal = "0.18.2"
+audioadapter-buffers = { version = "5.1", optional = true }
+cpal = { version = "0.18.2", optional = true }
 cw-core.workspace = true
-lofty = "0.25.5"
+lofty = { version = "0.25.5", optional = true }
 realfft = "3.5"
 rtrb = "0.4.1"
-rubato = "5.1.0"
-symphonia = { version = "0.6.1", features = ["all"] }
+rubato = { version = "5.1.0", optional = true }
+symphonia = { version = "0.6.1", features = ["all"], optional = true }
 thiserror = "2.0.21"
+
+[[example]]
+name = "analyse"
+required-features = ["playback"]
+
+[[example]]
+name = "probe"
+required-features = ["playback"]
+
+[[example]]
+name = "tempo"
+required-features = ["playback"]

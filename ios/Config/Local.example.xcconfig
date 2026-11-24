@@ -1,0 +1,15 @@
+// Copy to Local.xcconfig (git-ignored) and fill in. build-core.sh does the
+// copy for you the first time.
+
+// Your Apple developer team (Xcode > Settings > Accounts), for signing.
+DEVELOPMENT_TEAM =
+CODE_SIGN_STYLE = Automatic
+
+// Any reverse-DNS ID you own. MusicKit must be enabled for it in the
+// developer portal (Identifiers > your app > App Services > MusicKit).
+COVERWAVE_BUNDLE_ID = com.example.coverwave
+
+// The public client ID of your Spotify app (developer.spotify.com). Add the
+// redirect URI coverwave://spotify-callback and this bundle ID to that app.
+// Not a secret, but kept out of git so each developer uses their own.
+SPOTIFY_CLIENT_ID =

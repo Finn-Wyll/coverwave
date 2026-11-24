@@ -1,0 +1,60 @@
+# XcodeGen spec: `xcodegen generate` turns this into Coverwave.xcodeproj.
+# Build the Rust core first (./build-core.sh). See README.md.
+name: Coverwave
+options:
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+configFiles:
+  Debug: Config/Local.xcconfig
+  Release: Config/Local.xcconfig
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+packages:
+  SpotifyiOS:
+    url: https://github.com/spotify/ios-sdk
+    exactVersion: 5.0.1
+targets:
+  Coverwave:
+    type: application
+    platform: iOS
+    sources:
+      - path: Coverwave
+    dependencies:
+      - package: SpotifyiOS
+      - framework: Frameworks/CoverwaveCore.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(COVERWAVE_BUNDLE_ID)
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+        ENABLE_USER_SCRIPT_SANDBOXING: YES
+    info:
+      path: Coverwave/Info.plist
+      properties:
+        CFBundleDisplayName: coverwave
+        UILaunchScreen: {}
+        UIUserInterfaceStyle: Dark
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        ITSAppUsesNonExemptEncryption: false
+        NSAppleMusicUsageDescription: coverwave shows the cover of what Music is playing and lets you control it.
+        NSMicrophoneUsageDescription: If you turn on Listen with Microphone, coverwave hears the music so covers move with it. Audio is analysed on this iPhone and never recorded or sent.
+        LSApplicationQueriesSchemes:
+          - spotify
+        CFBundleURLTypes:
+          - CFBundleURLName: coverwave.spotify-login
+            CFBundleURLSchemes:
+              - coverwave
+        SpotifyClientID: $(SPOTIFY_CLIENT_ID)

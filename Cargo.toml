@@ -5,6 +5,7 @@ members = [
     "crates/cw-audio",
     "crates/cw-capture",
     "crates/cw-core",
+    "crates/cw-ffi",
     "crates/cw-library",
     "crates/cw-render",
     "crates/cw-sources",
