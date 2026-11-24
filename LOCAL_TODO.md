@@ -133,10 +133,14 @@ Spotify server.
       "User Management", so add yourself.
 
 ### System-audio capture (riskiest: `crates/cw-capture/src/macos.rs`)
-- [ ] With Spotify playing, run
+- [x] With Spotify playing, run
       `cargo run -p cw-capture --example meter -- 10 com.spotify.client`.
       macOS should ask for "audio recording" permission. Then the bars should
-      move with the music. Try `com.apple.Music` with Music.app too.
+      move with the music. (2026-11-24: worked first time at 48000 Hz; bands
+      moved and onsets counted about 2.5 per second. Bars mostly sat at 70-100%
+      on loud masters, so `RANGE_DB` in `cw-audio/src/analysis.rs` may need
+      narrowing.)
+- [ ] Try `com.apple.Music` with Music.app too.
 - [ ] If there is no prompt and only silence: check that
       `frontends/cw-tui/build.rs` embedded the Info.plist
       (`otool -s __TEXT __info_plist target/debug/cw-tui`). The meter example
@@ -150,7 +154,8 @@ Spotify server.
     `kAudioProcessPropertyBundleID`)
 - [ ] Capture must not change what you hear (the tap is "unmuted"), and must
       stop cleanly on quit. No "coverwave capture" device should be left in
-      Audio MIDI Setup.
+      Audio MIDI Setup. (Stopping cleanly and leaving no device behind were
+      verified 2026-11-24. Whether the sound changes still needs your ears.)
 - [ ] macOS 13–14.1 has no process taps; the ScreenCaptureKit fallback is not
       written yet (only needed if you are on an older macOS).
 
