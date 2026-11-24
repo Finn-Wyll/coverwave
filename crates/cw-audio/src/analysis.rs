@@ -23,7 +23,13 @@ pub const FFT_SIZE: usize = 2048;
 pub const HOP: usize = 512;
 
 /// Loudness range mapped onto 0..1 below each ceiling.
-const RANGE_DB: f32 = 30.0;
+///
+/// Tuned on the owner's 128-track library with `examples/range_tune.rs`
+/// (2026-11-24). Compared with the original 30 dB, 15 dB roughly doubles
+/// meter movement and nearly halves time pinned at the top (mid 47% -> 28%),
+/// while time stuck at the bottom stays under 3.5%. 12 dB moved more but
+/// swung quiet songs across almost the whole scale.
+pub const RANGE_DB: f32 = 15.0;
 /// How fast ceilings fall after a loud passage.
 const CEILING_RELEASE_DB_PER_SEC: f32 = 4.0;
 /// A band's ceiling never sits more than this below the overall ceiling.
@@ -72,6 +78,8 @@ pub struct Analyser {
     threshold_prev: f32,
     hops_since_onset: u32,
     min_gap_hops: u32,
+    /// Loudness range (dB) mapped onto 0..1 below each ceiling.
+    range_db: f32,
     frame: AudioFrame,
 }
 
@@ -115,8 +123,17 @@ impl Analyser {
             threshold_prev: f32::INFINITY,
             hops_since_onset: u32::MAX,
             min_gap_hops: (MIN_ONSET_GAP_SECS / dt).ceil() as u32,
+            range_db: RANGE_DB,
             frame: AudioFrame::default(),
         }
+    }
+
+    /// Overrides the loudness range mapped onto 0..1 (default [`RANGE_DB`]).
+    /// Narrower ranges make meters swing more on compressed masters. For
+    /// tuning; clamped to 3..=60 dB.
+    pub fn with_range_db(mut self, range_db: f32) -> Analyser {
+        self.range_db = range_db.clamp(3.0, 60.0);
+        self
     }
 
     /// The latest analysis.
@@ -173,8 +190,8 @@ impl Analyser {
         self.level_ceiling = level_db
             .max(self.level_ceiling - fall)
             .max(ABS_CEILING_FLOOR_DB);
-        let to_unit =
-            |v: f32, ceiling: f32| ((v - (ceiling - RANGE_DB)) / RANGE_DB).clamp(0.0, 1.0);
+        let range = self.range_db;
+        let to_unit = |v: f32, ceiling: f32| ((v - (ceiling - range)) / range).clamp(0.0, 1.0);
 
         let mut band_target = [0.0f32; BAND_COUNT];
         for b in 0..BAND_COUNT {
@@ -360,6 +377,27 @@ mod tests {
             }
             assert!(f.level > 0.8);
         }
+    }
+
+    #[test]
+    fn narrower_range_swings_further_on_the_same_drop() {
+        // Loud, then 6 dB quieter. The meter drops by (6 dB minus however
+        // far the ceiling has drifted down) / range, so halving the range
+        // should roughly double the drop.
+        let mut signal = noise(0.5, 1.5, 3);
+        signal.extend(noise(0.25, 0.5, 4));
+        let drop = |range: f32| {
+            let mut a = Analyser::new(RATE).with_range_db(range);
+            a.push(&signal);
+            1.0 - a.frame().level
+        };
+        let (wide, narrow) = (drop(30.0), drop(15.0));
+        assert!(wide > 0.05, "30 dB barely moved: {wide}");
+        let ratio = narrow / wide;
+        assert!((1.7..=2.3).contains(&ratio), "drops {wide} vs {narrow}");
+        // The default is the tuned value and stays within sane bounds.
+        assert!((3.0..=60.0).contains(&RANGE_DB));
+        assert_eq!(Analyser::new(RATE).with_range_db(1.0).range_db, 3.0);
     }
 
     #[test]

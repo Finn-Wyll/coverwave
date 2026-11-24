@@ -138,8 +138,8 @@ Spotify server.
       macOS should ask for "audio recording" permission. Then the bars should
       move with the music. (2026-11-24: worked first time at 48000 Hz; bands
       moved and onsets counted about 2.5 per second. Bars mostly sat at 70-100%
-      on loud masters, so `RANGE_DB` in `cw-audio/src/analysis.rs` may need
-      narrowing.)
+      on loud masters. `RANGE_DB` was then tuned from 30 to 15 dB using
+      `examples/range_tune.rs` on the whole library.)
 - [ ] Try `com.apple.Music` with Music.app too.
 - [ ] If there is no prompt and only silence: check that
       `frontends/cw-tui/build.rs` embedded the Info.plist
