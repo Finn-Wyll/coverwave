@@ -121,9 +121,10 @@ pub fn open_browser(url: &str) -> bool {
     }
     #[cfg(target_os = "macos")]
     let r = std::process::Command::new("open").arg(url).status();
+    // Not `cmd /C start`: cmd would split the URL at its `&`s.
     #[cfg(windows)]
-    let r = std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
+    let r = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", url])
         .status();
     #[cfg(all(not(target_os = "macos"), not(windows)))]
     let r = std::process::Command::new("xdg-open").arg(url).status();

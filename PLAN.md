@@ -330,7 +330,7 @@ Terminal handling: an alternate screen, raw mode, hidden cursor, restored on pan
 
 ## 12. Config
 
-`~/.config/coverwave/config.toml` (*M6:* implemented and written with comments on first run. Command-line flags override it. `music_dirs`, `fps`, `color`, `art_style`, `cell_aspect`, `offline`, `motion` work; `change_budget` and `charset` are accepted but not used yet.)
+`~/.config/coverwave/config.toml` (Windows: `%APPDATA%\coverwave\config.toml`; every location is listed in `frontends/cw-tui/src/paths.rs`) (*M6:* implemented and written with comments on first run. Command-line flags override it. `music_dirs`, `fps`, `color`, `art_style`, `cell_aspect`, `offline`, `motion` work; `change_budget` and `charset` are accepted but not used yet.)
 ```toml
 music_dirs = ["~/Music"]
 fps = 30
@@ -362,7 +362,7 @@ Each milestone ends with something runnable.
 | M5 | Renderer + layers | All 8 scene layers, constraints (subject protection, seamless loop, change budget), audio modulation. **Done** (all 14 layer kinds). |
 | M6 | Library, search, queue, playlists, lyrics | SQLite index, fuzzy search, m3u8 playlists, .lrc/embedded lyrics synced. **Done** (no folder watching, SYLT, LRCLIB or browser thumbnails yet). |
 | M7 | System capture + Spotify + Apple Music | macOS tap/SCK capture, Spotify PKCE control, Music.app control, source switching. **Built**: tested end-to-end on Linux against a mock Spotify server with pulse-monitor capture. The macOS tap and AppleScript paths are type-checked only, and ScreenCaptureKit is not done. Needs the Mac checks in LOCAL_TODO.md. |
-| M8 | Windows | WASAPI loopback, path/config differences, CI build on Windows |
+| M8 | Windows | WASAPI loopback, path/config differences, CI build on Windows. **Built, not yet run on Windows.** Loopback via cpal (it sets `AUDCLNT_STREAMFLAGS_LOOPBACK` on output devices). Paths: `%APPDATA%\coverwave` (config) and `%LOCALAPPDATA%\coverwave` (data, `cache\`), with `USERPROFILE` as home. Truecolor by default on Windows. The browser opens via `rundll32 url.dll` (cmd's `start` would split URLs at `&`). `.gitattributes` forces LF. CI (`.github/workflows/ci.yml`: fmt, clippy, tests and a release build on Linux, Windows and macOS) is **manual-only**, to avoid using the owner's Actions minutes, and has not been run yet. |
 
 M4 and M5 are the heart of the project, so they get the most time. Building M5 against a hand-written recipe first, before M4 is done, removes the dependency between them.
 

@@ -85,10 +85,13 @@ mod tests {
     fn save_load_round_trip() {
         let dir = std::env::temp_dir().join(format!("cw-pl-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let tracks: Vec<Track> = ["/music/a.flac", "/music/b c.mp3"]
+        // Absolute on every OS (a leading "/" is not absolute on Windows).
+        let music = std::env::temp_dir().join("music");
+        let paths = [music.join("a.flac"), music.join("b c.mp3")];
+        let tracks: Vec<Track> = paths
             .iter()
             .map(|p| Track {
-                path: PathBuf::from(p),
+                path: p.clone(),
                 info: TrackInfo {
                     title: "T".into(),
                     artist: Some("A".into()),
@@ -100,17 +103,9 @@ mod tests {
         let path = save(&dir, "road/trip", &tracks).unwrap();
         assert_eq!(path.file_name().unwrap(), "road_trip.m3u8");
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            text.starts_with("#EXTM3U\n#EXTINF:61,A - T\n/music/a.flac\n"),
-            "{text}"
-        );
-        assert_eq!(
-            load(&path).unwrap(),
-            [
-                PathBuf::from("/music/a.flac"),
-                PathBuf::from("/music/b c.mp3")
-            ]
-        );
+        let first = format!("#EXTM3U\n#EXTINF:61,A - T\n{}\n", paths[0].display());
+        assert!(text.starts_with(&first), "{text}");
+        assert_eq!(load(&path).unwrap(), paths);
         assert_eq!(list(&dir), [("road_trip".to_string(), path.clone())]);
 
         // Relative entries and BOMs from other players.

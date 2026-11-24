@@ -1,0 +1,6 @@
+# Keep text files LF everywhere so golden snapshots and assets match on
+# Windows checkouts.
+* text=auto eol=lf
+*.bin binary
+*.jpg binary
+*.png binary

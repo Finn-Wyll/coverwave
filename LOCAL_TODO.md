@@ -172,3 +172,19 @@ Spotify server.
 ### Switching
 - [ ] Switching to a remote source pauses local playback. Playing something
       from the library switches back to Local.
+
+## M8: Windows and CI (optional)
+
+Nothing here has run on Windows yet.
+
+- [ ] **CI, only if you want it:** merge this work to `main`, then on GitHub
+      go to Actions > CI > Run workflow. It builds, lints and tests on
+      Linux, Windows and macOS and attaches the binaries. It never runs on
+      its own. Each run uses roughly 150–250 of the private repo's free
+      monthly Actions minutes. With GitHub's default $0 spending limit it
+      cannot charge you: check Settings > Billing and plans first.
+- [ ] **On a Windows PC (if you have one):** `cargo run -p cw-tui --release`
+      in Windows Terminal. Check colours, keys (each key acts once), the
+      config at `%APPDATA%\coverwave\config.toml`, the library under
+      `%LOCALAPPDATA%\coverwave`, playback, and that `S` → Spotify captures
+      audio (whole-system loopback) and opens the login in your browser.

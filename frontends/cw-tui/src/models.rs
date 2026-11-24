@@ -76,28 +76,19 @@ impl ModelHandle {
     }
 }
 
-/// `$XDG_CACHE_HOME/coverwave`, else `~/.cache/coverwave`.
+/// Model and recipe cache (see `paths` for the per-OS location).
 pub fn cache_dir() -> Option<PathBuf> {
-    xdg_dir("XDG_CACHE_HOME", ".cache")
+    crate::paths::dir(crate::paths::Kind::Cache)
 }
 
-/// `$XDG_DATA_HOME/coverwave`, else `~/.local/share/coverwave`: library
-/// database, playlists, saved queue.
+/// Library database, playlists, saved queue.
 pub fn data_dir() -> Option<PathBuf> {
-    xdg_dir("XDG_DATA_HOME", ".local/share")
+    crate::paths::dir(crate::paths::Kind::Data)
 }
 
-/// `$XDG_CONFIG_HOME/coverwave`, else `~/.config/coverwave`.
+/// `config.toml` and recipe overrides.
 pub fn config_dir() -> Option<PathBuf> {
-    xdg_dir("XDG_CONFIG_HOME", ".config")
-}
-
-fn xdg_dir(var: &str, fallback: &str) -> Option<PathBuf> {
-    let base = std::env::var_os(var)
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(fallback)))?;
-    Some(base.join("coverwave"))
+    crate::paths::dir(crate::paths::Kind::Config)
 }
 
 /// Starts finding (or, unless `offline`, downloading) and loading the model
@@ -131,7 +122,7 @@ fn obtain(h: &ModelHandle, offline: bool) -> Result<Vec<u8>, String> {
         return std::fs::read(&p).map_err(|e| format!("COVERWAVE_MODEL: {e}"));
     }
     let dir = cache_dir()
-        .ok_or("no cache directory (HOME unset)")?
+        .ok_or("no cache directory (no home folder found)")?
         .join("models");
     let path = dir.join(MODEL_FILE);
     if let Ok(bytes) = std::fs::read(&path) {

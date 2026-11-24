@@ -117,11 +117,7 @@ impl Config {
 }
 
 pub fn expand_tilde(p: &str) -> PathBuf {
-    match (p.strip_prefix("~/"), std::env::var_os("HOME")) {
-        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
-        _ if p == "~" => std::env::var_os("HOME").map_or_else(|| PathBuf::from(p), PathBuf::from),
-        _ => PathBuf::from(p),
-    }
+    crate::paths::expand_tilde(p)
 }
 
 /// The default config file, written on first run so users can find it.

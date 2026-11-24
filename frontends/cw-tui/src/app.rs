@@ -40,12 +40,20 @@ impl ColorMode {
     /// `COLORTERM=truecolor|24bit` means 24-bit colour; anything else gets the
     /// 256-colour fallback, which every modern terminal supports.
     pub fn detect() -> ColorMode {
-        match std::env::var("COLORTERM") {
-            Ok(v) if v.eq_ignore_ascii_case("truecolor") || v.eq_ignore_ascii_case("24bit") => {
-                ColorMode::TrueColor
-            }
-            _ => ColorMode::Ansi256,
+        Self::detect_from(cfg!(windows), &|k| std::env::var(k).ok())
+    }
+
+    /// Windows 10+ consoles (conhost and Windows Terminal) all do 24-bit
+    /// colour but rarely set `COLORTERM`, so Windows defaults to truecolor.
+    pub fn detect_from(windows: bool, env: &dyn Fn(&str) -> Option<String>) -> ColorMode {
+        let colorterm = env("COLORTERM").unwrap_or_default();
+        if colorterm.eq_ignore_ascii_case("truecolor") || colorterm.eq_ignore_ascii_case("24bit") {
+            return ColorMode::TrueColor;
         }
+        if windows || env("WT_SESSION").is_some() {
+            return ColorMode::TrueColor;
+        }
+        ColorMode::Ansi256
     }
 
     pub fn from_name(s: &str) -> Option<ColorMode> {
@@ -785,6 +793,17 @@ mod tests {
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn colour_detection() {
+        let none = |_: &str| None;
+        assert_eq!(ColorMode::detect_from(false, &none), ColorMode::Ansi256);
+        assert_eq!(ColorMode::detect_from(true, &none), ColorMode::TrueColor);
+        let ct = |k: &str| (k == "COLORTERM").then(|| "truecolor".to_string());
+        assert_eq!(ColorMode::detect_from(false, &ct), ColorMode::TrueColor);
+        let wt = |k: &str| (k == "WT_SESSION").then(|| "x".to_string());
+        assert_eq!(ColorMode::detect_from(false, &wt), ColorMode::TrueColor);
     }
 
     #[test]

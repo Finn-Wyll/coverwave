@@ -7,6 +7,7 @@ mod browse;
 mod config;
 mod cover;
 mod models;
+mod paths;
 mod recipes;
 mod sources;
 mod ui;
