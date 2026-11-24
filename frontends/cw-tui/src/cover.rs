@@ -11,7 +11,7 @@ use crate::recipes::{Loaded, Source, Store};
 use cw_analysis::{Cover, Pca, ScenePrompts};
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -50,12 +50,12 @@ pub struct RecipeContext {
     pub model: ModelHandle,
 }
 
-type Message = (PathBuf, Result<CoverEntry, String>);
+type Message = (String, Result<CoverEntry, String>);
 
 pub struct CoverLoader {
     /// Keyed by audio file path, so a replaced queue never shows a stale
     /// cover.
-    slots: HashMap<PathBuf, Slot>,
+    slots: HashMap<String, Slot>,
     by_seed: HashMap<u64, Arc<CoverEntry>>,
     ctx: Arc<RecipeContext>,
     tx: Sender<Message>,
@@ -80,19 +80,31 @@ impl CoverLoader {
 
     /// Starts loading the cover for the audio file at `path` unless it is
     /// already loaded or loading.
-    pub fn request(&mut self, path: &std::path::Path) {
-        if self.slots.contains_key(path) {
+    pub fn request(&mut self, path: &Path) {
+        let p = path.to_path_buf();
+        self.request_with(&local_key(path), move || cw_audio::cover_art(&p));
+    }
+
+    /// Starts loading the cover identified by `key`, whose bytes `fetch`
+    /// produces (it runs on the worker thread: disk or network is fine),
+    /// unless it is already loaded or loading.
+    pub fn request_with(
+        &mut self,
+        key: &str,
+        fetch: impl FnOnce() -> Option<Vec<u8>> + Send + 'static,
+    ) {
+        if self.slots.contains_key(key) {
             return;
         }
-        let path = path.to_path_buf();
-        let key = path.clone();
+        let key = key.to_string();
+        let path = key.clone();
         self.slots.insert(key.clone(), Slot::Loading);
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         let spawned = std::thread::Builder::new()
             .name("cw-cover".into())
             .spawn(move || {
-                let result = cw_audio::cover_art(&path)
+                let result = fetch()
                     .ok_or_else(|| "no cover art".to_string())
                     .and_then(|bytes| cw_analysis::analyse(&bytes).map_err(|e| e.to_string()))
                     .map(|cover| {
@@ -130,8 +142,12 @@ impl CoverLoader {
         }
     }
 
-    pub fn get(&self, path: &std::path::Path) -> Option<&Slot> {
-        self.slots.get(path)
+    pub fn get(&self, path: &Path) -> Option<&Slot> {
+        self.slots.get(&local_key(path))
+    }
+
+    pub fn get_key(&self, key: &str) -> Option<&Slot> {
+        self.slots.get(key)
     }
 
     /// Forgets finished entries matching `pred`, so the next request loads
@@ -146,4 +162,9 @@ impl CoverLoader {
     pub fn invalidate_modelless(&mut self) {
         self.invalidate(|e| e.recipe.source == Source::NoModel);
     }
+}
+
+/// Cache key for a local file's cover.
+pub fn local_key(path: &Path) -> String {
+    format!("file:{}", path.display())
 }

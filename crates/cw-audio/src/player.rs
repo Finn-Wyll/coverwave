@@ -1,4 +1,4 @@
-use crate::analysis::Analyser;
+use crate::analysis::AnalyserHandle;
 use crate::reader::{OUT_CHANNELS, TrackReader};
 use crate::{AudioError, Track};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -19,8 +19,6 @@ const BUFFER_SECS: f64 = 0.75;
 /// every few milliseconds; if it ever falls behind, the callback drops
 /// samples rather than wait.
 const TAP_SECS: f64 = 0.25;
-/// How often the analyser thread wakes to drain the tap.
-const ANALYSER_POLL: Duration = Duration::from_millis(4);
 /// "Previous" restarts the current track if more than this has played.
 const PREV_RESTART_SECS: f64 = 3.0;
 
@@ -133,7 +131,7 @@ pub struct Player {
     shared: Arc<Shared>,
     commands: Sender<Command>,
     volume: u8,
-    analysis: Arc<Mutex<AudioFrame>>,
+    analysis: AnalyserHandle,
     // Dropping the stream stops audio; keep it alive with the player.
     _stream: cpal::Stream,
 }
@@ -203,11 +201,7 @@ impl Player {
             .spawn(move || decoder.run())
             .map_err(|e| AudioError::Device(format!("decoder thread: {e}")))?;
 
-        let analysis = Arc::new(Mutex::new(AudioFrame::default()));
-        let published = analysis.clone();
-        thread::Builder::new()
-            .name("cw-analyser".into())
-            .spawn(move || run_analyser(tap_out, out_rate, published))
+        let analysis = AnalyserHandle::spawn(tap_out, out_rate)
             .map_err(|e| AudioError::Device(format!("analyser thread: {e}")))?;
 
         Ok(Player {
@@ -274,7 +268,7 @@ impl Player {
     /// The latest music analysis of what is being heard (silence while
     /// paused or stopped).
     pub fn audio_frame(&self) -> AudioFrame {
-        *self.analysis.lock().unwrap_or_else(|e| e.into_inner())
+        self.analysis.frame()
     }
 
     /// Replaces the whole list and queue, starting at `start` from `secs`
@@ -486,27 +480,6 @@ where
     device
         .build_output_stream(*config, data_fn, err_fn, None)
         .map_err(|e| AudioError::Device(e.to_string()))
-}
-
-/// Drains the callback's mono tap into an [`Analyser`] and publishes each
-/// result. Exits when the stream (and with it the tap's producer) is gone.
-fn run_analyser(mut tap: Consumer<f32>, rate: u32, out: Arc<Mutex<AudioFrame>>) {
-    let mut analyser = Analyser::new(rate);
-    loop {
-        let n = tap.slots();
-        if n > 0 {
-            if let Ok(chunk) = tap.read_chunk(n) {
-                let (a, b) = chunk.as_slices();
-                analyser.push(a);
-                analyser.push(b);
-                chunk.commit_all();
-            }
-            *out.lock().unwrap_or_else(|e| e.into_inner()) = analyser.frame();
-        } else if tap.is_abandoned() {
-            return;
-        }
-        thread::sleep(ANALYSER_POLL);
-    }
 }
 
 /// Owns the queue and the open file; decodes ahead into the ring buffer.

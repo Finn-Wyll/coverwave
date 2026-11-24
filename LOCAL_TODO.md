@@ -107,11 +107,68 @@ note anything that feels wrong; it can all be tuned.
 - The browser has no album-art thumbnail yet; ID3 `SYLT` lyrics, LRCLIB
   lookup and folder watching are not done.
 
-## Before M7 (Spotify / Apple Music / system audio)
+## M7: Spotify, Apple Music, system audio
 
-- [ ] Create a Spotify developer app (developer.spotify.com). The config only
-      ever holds the public client ID; tokens go to the macOS keychain.
-      Playback control needs Spotify Premium.
-- [ ] System-audio capture prompts for permission on first use (macOS 14.2+
-      process tap, or Screen Recording on 13.x). Plan to click through that
-      once.
+The macOS parts were written and type-checked in the cloud but have
+**never run on a Mac**. Expect to fix things here, ideally in a local Claude
+Code session that can run them. Linux runs worked end to end against a mock
+Spotify server.
+
+### Setup
+- [ ] Create a Spotify app at developer.spotify.com (Dashboard > Create app,
+      Web API). Add the redirect URI `http://127.0.0.1:8898/callback`
+      exactly. Copy the **Client ID**; you never need the secret.
+- [ ] Put it in `~/.config/coverwave/config.toml`:
+      ```toml
+      [spotify]
+      client_id = "..."
+      redirect_port = 8898
+      ```
+      Development-mode Spotify apps only work for accounts you list under
+      "User Management", so add yourself.
+
+### System-audio capture (riskiest: `crates/cw-capture/src/macos.rs`)
+- [ ] With Spotify playing, run
+      `cargo run -p cw-capture --example meter -- 10 com.spotify.client`.
+      macOS should ask for "audio recording" permission. Then the bars should
+      move with the music. Try `com.apple.Music` with Music.app too.
+- [ ] If there is no prompt and only silence: check that
+      `frontends/cw-tui/build.rs` embedded the Info.plist
+      (`otool -s __TEXT __info_plist target/debug/cw-tui`). The meter example
+      has no Info.plist, so try the TUI too. Also check System Settings >
+      Privacy & Security > Screen & System Audio Recording.
+- [ ] If tap creation fails, print the OSStatus. Suspects, in order:
+  - the aggregate-device dictionary keys
+  - the tap format being non-interleaved
+  - Spotify's audio coming from a helper process whose bundle ID does not
+    start with `com.spotify.client` (list processes with
+    `kAudioProcessPropertyBundleID`)
+- [ ] Capture must not change what you hear (the tap is "unmuted"), and must
+      stop cleanly on quit. No "coverwave capture" device should be left in
+      Audio MIDI Setup.
+- [ ] macOS 13–14.1 has no process taps; the ScreenCaptureKit fallback is not
+      written yet (only needed if you are on an older macOS).
+
+### Spotify in the TUI
+- [ ] `S` → Spotify → "press L to log in" → `L` opens the browser → approve →
+      the HUD shows what is playing, with the cover and its motion.
+- [ ] Quit and restart: still logged in (refresh token in the Keychain; look
+      for "coverwave" in Keychain Access).
+- [ ] `space`, `n` / `p`, `←` / `→`, `+` / `-` control Spotify (Premium). If
+      nothing is playing anywhere, you get "no active Spotify device".
+- [ ] The progress bar moves smoothly between polls and corrects itself
+      after a seek.
+- [ ] The cover reacts to the music (captured), not only gentle default
+      motion. `D` shows `capture on, 48000 Hz`.
+
+### Apple Music (`crates/cw-sources/src/apple_music.rs`)
+- [ ] `S` → Apple Music: macOS asks whether your terminal may control Music
+      (Automation). Allow it. The track, cover, progress and keys work.
+- [ ] A track without artwork shows the idle scene; a radio stream does not
+      crash (`missing value` fields).
+- [ ] Your locale's decimal separator (comma or dot) gives the right
+      position and duration.
+
+### Switching
+- [ ] Switching to a remote source pauses local playback. Playing something
+      from the library switches back to Local.

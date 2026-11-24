@@ -239,6 +239,14 @@ trait SystemCapture { fn start(&mut self, sink: Producer<f32>) -> Result<()>; fn
 | Linux | PipeWire/Pulse monitor source | Stretch goal. |
 | iOS / Android | Not possible | The OS sandbox blocks this, so ports fall back to local-file audio only. |
 
+*As built in M7:* `Capture::start(&Target, Producer<f32>) -> Capture` (dropping it stops). `Target::Apps(bundle IDs)` or `Target::System`, mono into a ring buffer, analysed by the same `AnalyserHandle` the local player uses.
+- **macOS:** a process tap (`CATapDescription` stereo mixdown of the processes whose bundle ID starts with `com.spotify.client` / `com.apple.Music`, private and unmuted) inside a private aggregate device clocked by the default output, read with an IO block. `frontends/cw-tui/build.rs` embeds `macos/Info.plist` (`NSAudioCaptureUsageDescription`) so the permission prompt can appear.
+- **Not done:** the ScreenCaptureKit fallback for macOS 13–14.1.
+- **Windows:** cpal loopback (input stream on the default output); whole-system mix.
+- **Linux:** cpal's default input. Point it at a monitor (`pactl set-default-source <sink>.monitor`), as the cloud tests do.
+- **Capture retries:** every 3s while the app has no audio yet, and restarts after 8s of silence while the source says it is playing (the app restarted).
+- **Testing:** the macOS code is UNTESTED. It is type-checked and clippy-clean for `aarch64-apple-darwin` from Linux; see LOCAL_TODO.md. `cargo run -p cw-capture --example meter -- 5 com.spotify.client` checks capture without the TUI.
+
 ---
 
 ## 9. Sources (`cw-sources`)
@@ -248,7 +256,17 @@ trait SystemCapture { fn start(&mut self, sink: Producer<f32>) -> Result<()>; fn
 - **Apple Music (macOS):** controls Music.app via `osascript`/AppleScript (state, track, artwork export, transport). The MusicKit web API for catalogue/library access is optional and later, since it needs an Apple Developer token.
 - A shared `Source` trait means the UI never cares which source is active.
 
----
+*As built in M7:*
+- **Sources:** Spotify and Apple Music are `cw_sources::Backend`s, each polled on its own thread (`RemoteHandle`) about once a second. The UI reads a `RemoteState` (now playing, auth, last error) and extrapolates the position between polls. Local files stay with the richer `cw-audio` player, not this trait.
+- **Switching:** `S` cycles the sources that are available: Spotify when `[spotify] client_id` is set, Apple Music on macOS. Following a remote source pauses local playback, and picking music in the library switches back to Local. Transport keys go to the active source.
+- **Remote covers:** they go through the same analysis and recipe pipeline, keyed by `<source>:<track id>`.
+- **Spotify:**
+  - Login is PKCE with a one-shot loopback listener on `http://127.0.0.1:<redirect_port>/callback` (default 8898; register exactly that URI). `L` opens the browser, honouring `$BROWSER`.
+  - The refresh token is stored in the keychain via `keyring` 3 (apple-native / windows-native; in-memory on Linux) and rotated tokens are saved.
+  - The client retries a 401 after refreshing, backs off on 429 using `Retry-After`, and maps 403 to "Premium needed" and 404 to "no active device". Podcast episodes are supported.
+  - `COVERWAVE_SPOTIFY_API` / `COVERWAVE_SPOTIFY_ACCOUNTS` point it at a mock server for tests.
+- **Apple Music:** `osascript` with a tab-separated state line (decimal commas handled), and artwork exported to a temp file once per track. Automation permission errors (-1743) get a hint. UNTESTED on a Mac.
+- **Folder watching** (`notify`): not yet.
 
 ## 10. Library, queue, playlists, lyrics (`cw-library`)
 
@@ -297,7 +315,7 @@ trait SystemCapture { fn start(&mut self, sink: Producer<f32>) -> Result<()>; fn
 | `enter` | open, or play from the selected track / `a` add to queue / `backspace` back |
 | `P` | save the queue as a playlist |
 | `l` | toggle lyrics, `[` `]` shift lyric offset |
-| `S` | switch source (Local / Spotify / Apple Music) |
+| `S` | switch source (Local / Spotify / Apple Music) / `L` log in to Spotify |
 | `R` | reload recipe (picks up override edits) |
 | `D` | debug overlay, cycling: stats (fps, cells changed, cover, live audio) → recipe (source, scenes, layers, globals, DNA) → off |
 | `m` | motion on/off (static art) |
@@ -343,7 +361,7 @@ Each milestone ends with something runnable.
 | M4 | Analysis pipeline | MobileCLIP + PCA + features + mask + seed produce a cached recipe JSON; `tools/pca-fit` produces `pca.bin`. **Done.** The shipped `pca.bin` is provisional (see risks). |
 | M5 | Renderer + layers | All 8 scene layers, constraints (subject protection, seamless loop, change budget), audio modulation. **Done** (all 14 layer kinds). |
 | M6 | Library, search, queue, playlists, lyrics | SQLite index, fuzzy search, m3u8 playlists, .lrc/embedded lyrics synced. **Done** (no folder watching, SYLT, LRCLIB or browser thumbnails yet). |
-| M7 | System capture + Spotify + Apple Music | macOS tap/SCK capture, Spotify PKCE control, Music.app control, source switching |
+| M7 | System capture + Spotify + Apple Music | macOS tap/SCK capture, Spotify PKCE control, Music.app control, source switching. **Built**: tested end-to-end on Linux against a mock Spotify server with pulse-monitor capture. The macOS tap and AppleScript paths are type-checked only, and ScreenCaptureKit is not done. Needs the Mac checks in LOCAL_TODO.md. |
 | M8 | Windows | WASAPI loopback, path/config differences, CI build on Windows |
 
 M4 and M5 are the heart of the project, so they get the most time. Building M5 against a hand-written recipe first, before M4 is done, removes the dependency between them.

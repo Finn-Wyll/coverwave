@@ -14,7 +14,7 @@ mod info;
 mod player;
 mod reader;
 
-pub use analysis::Analyser;
+pub use analysis::{Analyser, AnalyserHandle};
 pub use info::{AUDIO_EXTENSIONS, Track, TrackInfo, collect_audio_files, cover_art, is_audio_file};
 pub use player::{Player, Snapshot, Status};
 

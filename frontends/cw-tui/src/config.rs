@@ -25,6 +25,40 @@ pub struct Config {
     pub change_budget: Option<f32>,
     pub charset: Option<String>,
     pub lyrics: Lyrics,
+    pub spotify: Spotify,
+    pub capture: Capture,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Spotify {
+    /// The public client ID of your Spotify app (developer.spotify.com).
+    /// Empty: no Spotify source.
+    pub client_id: String,
+    /// Register `http://127.0.0.1:<port>/callback` in that app.
+    pub redirect_port: u16,
+}
+
+impl Default for Spotify {
+    fn default() -> Self {
+        Spotify {
+            client_id: String::new(),
+            redirect_port: 8898,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Capture {
+    /// Capture the remote player's audio so its cover reacts to the music.
+    pub enabled: bool,
+}
+
+impl Default for Capture {
+    fn default() -> Self {
+        Capture { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -47,6 +81,8 @@ impl Default for Config {
             change_budget: None,
             charset: None,
             lyrics: Lyrics::default(),
+            spotify: Spotify::default(),
+            capture: Capture::default(),
         }
     }
 }
@@ -100,6 +136,16 @@ art_style = "palette"   # palette | truecolor | duotone  (c cycles in the app)
 cell_aspect = "auto"    # auto (measured) or a number such as 0.5
 offline = false         # true: never download the cover-analysis model
 motion = true           # false: start with cover motion off (m toggles)
+
+[spotify]
+# Your Spotify app's public client ID (developer.spotify.com > Dashboard).
+# In the app, add the redirect URI http://127.0.0.1:8898/callback
+client_id = ""
+redirect_port = 8898
+
+[capture]
+# Listen to Spotify / Apple Music so their covers react to the music.
+enabled = true
 "#;
 
 #[cfg(test)]

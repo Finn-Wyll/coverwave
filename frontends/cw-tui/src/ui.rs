@@ -500,6 +500,10 @@ fn draw_browser(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_hud(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Block::new().style(Style::new().bg(BG)), area);
+    if app.sources.is_remote() {
+        draw_remote_hud(f, app, area);
+        return;
+    }
 
     let key = |k: &'static str| Span::styled(k, Style::new().fg(FG).add_modifier(Modifier::BOLD));
     let accent = accent(app);
@@ -578,6 +582,81 @@ fn draw_hud(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(right), r);
 }
 
+/// The HUD while following Spotify or Apple Music.
+fn draw_remote_hud(f: &mut Frame, app: &App, area: Rect) {
+    let accent = accent(app);
+    let name = app.sources.active.name();
+    let tag = Span::styled(format!(" {name} "), Style::new().fg(BG).bg(DIM));
+    let state = app.sources.state.as_ref();
+    let Some((state, now)) = state.and_then(|s| s.now.as_ref().map(|n| (s, n))) else {
+        let msg = match state.map(|s| (&s.auth, &s.error)) {
+            Some((cw_sources::Auth::NeedsLogin, _)) => format!("{name}: press L to log in"),
+            Some((cw_sources::Auth::LoggingIn, _)) => {
+                "finish logging in in your browser".to_string()
+            }
+            Some((_, Some(e))) => e.clone(),
+            Some(_) => format!("nothing playing in {name}"),
+            None => "connecting".to_string(),
+        };
+        let line = Line::from(vec![
+            Span::raw(" "),
+            tag,
+            Span::raw("  "),
+            dim(fit(&msg, area.width.saturating_sub(16) as usize)),
+        ]);
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    };
+    let pos = state.position_now(std::time::Instant::now());
+    let time = match now.duration_secs {
+        Some(d) => format!("{} / {}", fmt_time(pos), fmt_time(d)),
+        None => fmt_time(pos),
+    };
+    let bar_w = (area.width / 5).clamp(10, 40) as usize;
+    let bar = progress_bar(pos, now.duration_secs, bar_w);
+    let mut right = vec![
+        Span::styled(bar.0, Style::new().fg(accent)),
+        dim(bar.1),
+        Span::raw("  "),
+        Span::styled(time, Style::new().fg(FG)),
+    ];
+    if let Some(v) = now.volume {
+        right.push(dim(format!("   vol {v:>3}")));
+    }
+    right.push(Span::raw(" "));
+    let right = Line::from(right);
+    let right_w = right.width() as u16;
+    let [l, r] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(right_w)]).areas(area);
+    let glyph = if now.playing {
+        Span::styled(" > ", Style::new().fg(accent))
+    } else {
+        Span::styled(" ||", Style::new().fg(FG))
+    };
+    let title_w = (l.width as usize).saturating_sub(name.len() + 8);
+    let title = fit(&now.title, title_w);
+    let rest = title_w.saturating_sub(title.chars().count());
+    let mut left = vec![glyph, Span::raw(" "), tag, Span::raw(" ")];
+    left.push(Span::styled(
+        title,
+        Style::new().fg(FG).add_modifier(Modifier::BOLD),
+    ));
+    if let Some(artist) = &now.artist
+        && rest > 6
+    {
+        left.push(dim(fit(&format!("  {artist}"), rest)));
+    }
+    if let Some(e) = &state.error
+        && l.width > 60
+    {
+        left.push(Span::styled(
+            format!("  {}", fit(e, 30)),
+            Style::new().fg(ERROR),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(left)), l);
+    f.render_widget(Paragraph::new(right), r);
+}
+
 /// Returns (played, remaining) parts of an ASCII progress bar.
 fn progress_bar(pos: f64, duration: Option<f64>, width: usize) -> (String, String) {
     let frac = duration
@@ -605,7 +684,17 @@ fn draw_debug(f: &mut Frame, app: &App, main: Rect) {
             }
         )),
     ];
-    if let Some(s) = &app.snapshot {
+    if app.sources.is_remote() {
+        let state = app.sources.state.as_ref();
+        let status = match state.and_then(|s| s.now.as_ref()) {
+            Some(n) if n.playing => "Playing",
+            Some(_) => "Paused",
+            None => "Stopped",
+        };
+        let pos = state.map_or(0.0, |s| s.position_now(std::time::Instant::now()));
+        lines.push(Line::from(format!("status  {status}")));
+        lines.push(Line::from(format!("pos     {pos:.2}s")));
+    } else if let Some(s) = &app.snapshot {
         lines.push(Line::from(format!("status  {:?}", s.status)));
         lines.push(Line::from(format!("pos     {:.2}s", s.position_secs)));
     }
@@ -624,7 +713,12 @@ fn draw_debug(f: &mut Frame, app: &App, main: Rect) {
         }
     )));
     let playing = app.current_path();
-    let cover = match playing.as_deref().and_then(|p| app.covers.get(p)) {
+    let slot = if app.sources.is_remote() {
+        app.shown_cover.clone().map(crate::cover::Slot::Ready)
+    } else {
+        playing.as_deref().and_then(|p| app.covers.get(p)).cloned()
+    };
+    let cover = match slot.as_ref() {
         None => "-".to_string(),
         Some(Slot::Loading) => "loading".to_string(),
         Some(Slot::Missing(why)) => why.clone(),
@@ -633,6 +727,13 @@ fn draw_debug(f: &mut Frame, app: &App, main: Rect) {
         }
     };
     lines.push(Line::from(format!("cover   {}", fit(&cover, 18))));
+    lines.push(Line::from(format!("source  {}", app.sources.active.name())));
+    if app.sources.is_remote() {
+        lines.push(Line::from(format!(
+            "capture {}",
+            fit(&app.sources.capture_description(), 20)
+        )));
+    }
     if let Some(c) = &app.shown_cover {
         let mut swatches = vec![Span::raw("palette ")];
         for &col in &c.palette.colors {
@@ -795,6 +896,8 @@ const KEYS: &[(&str, &str)] = &[
     ("a", "add to queue"),
     ("bksp esc", "back"),
     ("P", "save queue as playlist"),
+    ("S", "source: local, Spotify, Apple Music"),
+    ("L", "log in to Spotify"),
     ("l", "lyrics on / off"),
     ("[  ]", "lyrics earlier / later"),
     ("c", "cover style (palette, true, duo)"),

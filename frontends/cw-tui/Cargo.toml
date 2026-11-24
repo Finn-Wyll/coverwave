@@ -9,10 +9,13 @@ repository.workspace = true
 anyhow = "1.0.105"
 cw-analysis.workspace = true
 cw-audio.workspace = true
+cw-capture.workspace = true
 cw-core.workspace = true
 cw-library.workspace = true
 cw-render.workspace = true
+cw-sources.workspace = true
 ratatui = "0.30.2"
+rtrb = "0.4"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11"

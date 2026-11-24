@@ -256,6 +256,53 @@ impl Analyser {
     }
 }
 
+/// How often the analyser thread wakes to drain its input.
+const POLL: std::time::Duration = std::time::Duration::from_millis(4);
+
+/// An [`Analyser`] on its own thread, fed mono samples through a lock-free
+/// ring buffer (from the playback callback or a system-capture callback).
+/// The thread exits when the producer side is dropped.
+#[derive(Clone)]
+pub struct AnalyserHandle {
+    frame: Arc<std::sync::Mutex<AudioFrame>>,
+}
+
+impl AnalyserHandle {
+    pub fn spawn(
+        mut input: rtrb::Consumer<f32>,
+        sample_rate: u32,
+    ) -> std::io::Result<AnalyserHandle> {
+        let frame = Arc::new(std::sync::Mutex::new(AudioFrame::default()));
+        let out = frame.clone();
+        std::thread::Builder::new()
+            .name("cw-analyser".into())
+            .spawn(move || {
+                let mut analyser = Analyser::new(sample_rate);
+                loop {
+                    let n = input.slots();
+                    if n > 0 {
+                        if let Ok(chunk) = input.read_chunk(n) {
+                            let (a, b) = chunk.as_slices();
+                            analyser.push(a);
+                            analyser.push(b);
+                            chunk.commit_all();
+                        }
+                        *out.lock().unwrap_or_else(|e| e.into_inner()) = analyser.frame();
+                    } else if input.is_abandoned() {
+                        return;
+                    }
+                    std::thread::sleep(POLL);
+                }
+            })?;
+        Ok(AnalyserHandle { frame })
+    }
+
+    /// The latest analysis.
+    pub fn frame(&self) -> AudioFrame {
+        *self.frame.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,6 +437,23 @@ mod tests {
         // A steady tone after the burst: no new onsets, so the pulse fades.
         a.push(&sine(440.0, 0.3, 0.3));
         assert!(a.frame().onset < 0.05, "{}", a.frame().onset);
+    }
+
+    #[test]
+    fn handle_analyses_on_its_own_thread_and_exits() {
+        let (mut tx, rx) = rtrb::RingBuffer::new(RATE as usize);
+        let h = AnalyserHandle::spawn(rx, RATE).unwrap();
+        for s in sine(120.0, 0.5, 0.5) {
+            while tx.push(s).is_err() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while h.frame().bands[1] < 0.5 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(h.frame().bands[1] > 0.5, "{:?}", h.frame());
+        drop(tx);
     }
 
     #[test]

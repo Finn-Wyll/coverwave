@@ -1,0 +1,28 @@
+[package]
+name = "cw-sources"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+getrandom = "0.3"
+keyring = "3.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+ureq = { version = "3.5", features = ["platform-verifier"], optional = true }
+
+[features]
+# HTTP (Spotify, cover downloads). Always on in real builds; off only to
+# type-check the macOS/Windows code from Linux, where TLS crypto needs the
+# target's C toolchain: cargo check -p cw-sources --no-default-features --target aarch64-apple-darwin
+default = ["http"]
+http = ["dep:ureq"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6", features = ["apple-native"] }
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3.6", features = ["windows-native"] }

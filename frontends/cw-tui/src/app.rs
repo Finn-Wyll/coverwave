@@ -1,8 +1,10 @@
 use crate::browse::{Action, Browser};
 use crate::cover::{CoverEntry, CoverLoader, RecipeContext, Slot};
+use crate::sources::{SourceKind, Sources};
 use cw_audio::{Player, Snapshot};
 use cw_core::{ArtStyle, AudioFrame, CellGrid, Repeat};
 use cw_library::{Library, Lyrics, ScanStats};
+use cw_sources::Command as Remote;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -178,6 +180,8 @@ pub struct App {
     pub lyrics: Option<(PathBuf, Option<Lyrics>)>,
     /// The track being heard and the furthest point reached, for play counts.
     heard: Option<(PathBuf, f64, Option<f64>)>,
+    /// Local, Spotify or Apple Music (`S` cycles).
+    pub sources: Sources,
     pub art_style: ArtStyle,
     pub color_mode: ColorMode,
     /// Cell width / height used to keep covers in proportion.
@@ -239,6 +243,7 @@ impl App {
             lyrics_offset: 0.0,
             lyrics: None,
             heard: None,
+            sources: Sources::new(&crate::config::Config::default()),
             art_style: settings.art_style,
             color_mode: settings.color_mode,
             cell_aspect: settings
@@ -261,10 +266,16 @@ impl App {
     /// Refreshes the playback snapshot; call once before drawing a frame.
     pub fn tick(&mut self) {
         self.snapshot = self.player.as_ref().map(Player::snapshot);
-        self.audio = self
-            .player
-            .as_ref()
-            .map_or(AudioFrame::default(), Player::audio_frame);
+        self.sources.tick();
+        self.audio = if self.sources.is_remote() {
+            // A remote player's audio comes from system capture (silence,
+            // and gentle default motion, until capture is running).
+            self.sources.audio_frame().unwrap_or_default()
+        } else {
+            self.player
+                .as_ref()
+                .map_or(AudioFrame::default(), Player::audio_frame)
+        };
         self.covers.poll();
         // Covers analysed before the model was ready get proper recipes now.
         let ready = self.covers.model().ready().is_some();
@@ -323,6 +334,9 @@ impl App {
 
     /// Path of the track being heard.
     pub fn current_path(&self) -> Option<PathBuf> {
+        if self.sources.is_remote() {
+            return None;
+        }
         let (snap, player) = (self.snapshot.as_ref()?, self.player.as_ref()?);
         snap.track.map(|t| player.tracks()[t].path.clone())
     }
@@ -396,6 +410,11 @@ impl App {
     }
 
     fn apply(&mut self, action: Action) {
+        if action != Action::None && self.sources.is_remote() {
+            // Picking local music switches back to local playback.
+            self.sources.select(SourceKind::Local);
+            self.say("source: Local");
+        }
         let Some(p) = self.player.as_mut() else {
             if action != Action::None {
                 self.say("no audio device: cannot play");
@@ -452,6 +471,22 @@ impl App {
     /// track change usually finds its art ready), and picks what Art mode
     /// shows.
     fn update_cover(&mut self) {
+        if self.sources.is_remote() {
+            let Some(now) = self.sources.state.as_ref().and_then(|s| s.now.clone()) else {
+                self.shown_cover = None;
+                return;
+            };
+            let key = format!("{}:{}", self.sources.active.name(), now.track_id);
+            let art = now.art.clone();
+            self.covers
+                .request_with(&key, move || cw_sources::fetch_art(&art));
+            match self.covers.get_key(&key) {
+                Some(Slot::Ready(c)) => self.shown_cover = Some(c.clone()),
+                Some(Slot::Missing(_)) => self.shown_cover = None,
+                Some(Slot::Loading) | None => {}
+            }
+            return;
+        }
         let (Some(snap), Some(player)) = (self.snapshot.as_ref(), self.player.as_ref()) else {
             return;
         };
@@ -572,6 +607,11 @@ impl App {
                     .open(crate::browse::ViewKind::Search, self.library.as_ref());
             }
             KeyCode::Char('P') => self.prompt = Some(String::new()),
+            KeyCode::Char('S') => self.switch_source(),
+            KeyCode::Char('L') if self.sources.active == SourceKind::Spotify => {
+                self.sources.send(Remote::Login);
+                self.say("opening Spotify login in your browser");
+            }
             KeyCode::Char('l') => self.show_lyrics = !self.show_lyrics,
             KeyCode::Char('[') => self.lyrics_offset -= 0.25,
             KeyCode::Char(']') => self.lyrics_offset += 0.25,
@@ -633,6 +673,10 @@ impl App {
                 return;
             }
         }
+        if self.sources.is_remote() {
+            self.remote_key(code, shift);
+            return;
+        }
         let Some(p) = self.player.as_mut() else {
             return;
         };
@@ -654,6 +698,48 @@ impl App {
             KeyCode::Char('r') => p.cycle_repeat(),
             _ => {}
         }
+    }
+
+    /// `S`: the next source. Local playback pauses while a remote source is
+    /// followed.
+    fn switch_source(&mut self) {
+        if let Some(hint) = self.sources.hint() {
+            self.say(hint);
+            return;
+        }
+        let kind = self.sources.cycle();
+        if kind != SourceKind::Local
+            && let Some(p) = self.player.as_mut()
+        {
+            p.set_paused(true);
+        }
+        self.say(format!("source: {}", kind.name()));
+    }
+
+    /// Transport keys while a remote source is active.
+    fn remote_key(&mut self, code: KeyCode, shift: bool) {
+        let state = self.sources.state.clone();
+        let now = state.as_ref().and_then(|s| s.now.clone());
+        let pos = state
+            .as_ref()
+            .map_or(0.0, |s| s.position_now(Instant::now()));
+        let step = if shift { SEEK_LARGE } else { SEEK_SMALL };
+        let volume = now.as_ref().and_then(|n| n.volume).unwrap_or(50);
+        let cmd = match code {
+            KeyCode::Char(' ') => Remote::PlayPause,
+            KeyCode::Char('n') => Remote::Next,
+            KeyCode::Char('p') => Remote::Previous,
+            KeyCode::Right => Remote::Seek((pos + step).max(0.0) as u64),
+            KeyCode::Left => Remote::Seek((pos - step).max(0.0) as u64),
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                Remote::Volume(volume.saturating_add(VOLUME_STEP).min(100))
+            }
+            KeyCode::Char('-') | KeyCode::Char('_') => {
+                Remote::Volume(volume.saturating_sub(VOLUME_STEP))
+            }
+            _ => return,
+        };
+        self.sources.send(cmd);
     }
 
     pub fn on_frame_drawn(&mut self, at: Instant) {

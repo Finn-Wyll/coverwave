@@ -3,9 +3,11 @@ resolver = "3"
 members = [
     "crates/cw-analysis",
     "crates/cw-audio",
+    "crates/cw-capture",
     "crates/cw-core",
     "crates/cw-library",
     "crates/cw-render",
+    "crates/cw-sources",
     "frontends/cw-tui",
     "tools/pca-fit",
 ]
@@ -22,6 +24,8 @@ cw-core = { path = "crates/cw-core" }
 cw-library = { path = "crates/cw-library" }
 cw-render = { path = "crates/cw-render" }
 cw-audio = { path = "crates/cw-audio" }
+cw-capture = { path = "crates/cw-capture" }
+cw-sources = { path = "crates/cw-sources" }
 
 [profile.release]
 lto = "thin"

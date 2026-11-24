@@ -8,6 +8,7 @@ mod config;
 mod cover;
 mod models;
 mod recipes;
+mod sources;
 mod ui;
 
 use anyhow::{Context, Result, bail};
@@ -242,6 +243,7 @@ fn main() -> Result<()> {
     let fps = settings.fps;
     let mut app = App::new(fps, player, audio_error, settings, recipes);
     app.attach_library(library, dirs, scan_rx);
+    app.sources = sources::Sources::new(&config);
     if !warnings.is_empty() {
         app.say(warnings.join("; "));
     }
