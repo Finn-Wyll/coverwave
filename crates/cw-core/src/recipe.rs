@@ -13,7 +13,8 @@ use std::collections::BTreeMap;
 
 /// Bump when the recipe's meaning changes; cached recipes with another
 /// version are rebuilt.
-pub const RECIPE_VERSION: u32 = 1;
+/// 2: aurora, starfield, digital rain and lightning layers (2026-11-24).
+pub const RECIPE_VERSION: u32 = 2;
 
 /// Number of style-DNA components.
 pub const DNA_DIMS: usize = 8;
@@ -203,6 +204,33 @@ pub enum Layer {
     },
     /// Fallback when no scene is strong enough: slow palette breathing.
     Ambient { intensity: f32, cycles: u32 },
+    /// sky, snow: shimmering curtains across the upper background.
+    Aurora {
+        intensity: f32,
+        /// Curtains, 1..=3.
+        bands: u32,
+        cycles: u32,
+    },
+    /// very dark scene, sky: stars streaming outward from the subject.
+    /// Streaks lengthen with loudness.
+    Starfield {
+        intensity: f32,
+        count: u32,
+        cycles: u32,
+    },
+    /// city at night: cascading columns of the cover's own glyphs.
+    DigitalRain {
+        intensity: f32,
+        density: f32,
+        fall_cycles: u32,
+    },
+    /// very dark scene, ocean: a bolt toward the subject on some strong
+    /// beats (which ones is decided by the seed and the beat count).
+    Lightning {
+        intensity: f32,
+        /// Share of strong beats that strike, 0..1.
+        chance: f32,
+    },
 }
 
 impl Layer {
@@ -221,7 +249,11 @@ impl Layer {
             | Layer::HeatShimmer { intensity, .. }
             | Layer::Dust { intensity, .. }
             | Layer::CloudDrift { intensity, .. }
-            | Layer::Ambient { intensity, .. } => *intensity,
+            | Layer::Ambient { intensity, .. }
+            | Layer::Aurora { intensity, .. }
+            | Layer::Starfield { intensity, .. }
+            | Layer::DigitalRain { intensity, .. }
+            | Layer::Lightning { intensity, .. } => *intensity,
         }
     }
 
@@ -242,6 +274,10 @@ impl Layer {
             Layer::Dust { .. } => "dust",
             Layer::CloudDrift { .. } => "cloud_drift",
             Layer::Ambient { .. } => "ambient",
+            Layer::Aurora { .. } => "aurora",
+            Layer::Starfield { .. } => "starfield",
+            Layer::DigitalRain { .. } => "digital_rain",
+            Layer::Lightning { .. } => "lightning",
         }
     }
 }

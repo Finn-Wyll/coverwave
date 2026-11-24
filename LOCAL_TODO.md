@@ -80,12 +80,20 @@ note anything that feels wrong; it can all be tuned.
 - [ ] Watch a handful of different covers for a full 8-second loop each.
       Does the motion support the art or compete with it? Name any layer
       that feels too busy (snow, rain, fog, ripple, heat, clouds, flicker,
-      neon, embers, dust, fireflies, sway, shimmer, ambient).
+      neon, embers, dust, fireflies, sway, shimmer, ambient, aurora,
+      starfield, digital rain, lightning).
+- [ ] Beat effects on real music: shockwave from the subject, bass thump,
+      glitch slices on big hits, margin glow and equaliser. Too much, too
+      little, or wrong on some genre? Tuning constants are at the top of
+      `crates/cw-render/src/scene.rs` (`RING_TINT`, `THUMP_CELLS`,
+      `BEAT_BURST`) and in `gain_intensity`.
+- [ ] Menus never get corrupted any more. If they do, press ctrl-l and
+      send the contents of `~/.cache/coverwave/coverwave.log`.
 - [ ] With `D`: `fps` holds at 30/30 at full screen, and `changed` stays at
       about 25% or less between beats (beats may briefly go higher).
 - [x] `cargo bench -p cw-render --bench render` stays under 4ms
-      (0.5ms in the cloud; on this Mac 0.30ms, or 0.92ms with the change
-      limiter, on 2026-11-24).
+      (0.5ms in the cloud; on this Mac 0.42ms, 0.72ms with the change
+      limiter, and 0.28ms for the new layers on a full beat, on 2026-11-24).
 - [ ] `m` turns motion off and on. Copy a recipe from
       `~/.cache/coverwave/recipes/<hash>.json` to
       `~/.config/coverwave/overrides/`, edit a layer, and press `R`.

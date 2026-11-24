@@ -120,14 +120,14 @@ Analysis budget: under 300ms per new cover on an M-series Mac, and under 5ms on 
 ### Effect layers (one per scene)
 | Scene | Layer | Core parameters |
 |---|---|---|
-| snow | `falling_particles` | density, fall speed, drift, glyphs `. * +` |
+| snow | `falling_particles` + `aurora` | density, fall speed, drift, glyphs `. * +`; curtain count |
 | lava | `heat_cycle` + `embers` | noise scale, palette cycle speed, ember rise rate |
-| very dark | `flicker` + `fog` | flicker rate, fog density, fog drift vector |
+| very dark | `starfield` + `lightning` + `flicker` + `fog` | star count; strike chance; flicker rate; fog density and drift |
 | forest | `row_sway` + `fireflies` | sway amplitude, wavelength, firefly count/blink |
-| ocean | `ripple` | displacement amplitude, wavelength, direction |
-| city at night | `neon_flicker` + `rain` | flicker cells/rate, rain angle, density |
+| ocean | `ripple` + `lightning` | displacement amplitude, wavelength, direction; strike chance |
+| city at night | `neon_flicker` + `digital_rain` + `rain` | flicker cells/rate; column density; rain angle, density |
 | desert | `heat_shimmer` + `dust` | shimmer amplitude, dust drift |
-| sky | `cloud_drift` | layer count, drift speed, softness |
+| sky | `cloud_drift` + `aurora` + `starfield` | layer count, drift speed, softness; curtains; stars |
 
 ### Rules
 - `layer.intensity = scene_weight`. Each scene at or above 0.10 contributes its layers, all at its weight. Layers are then sorted by intensity, ties keep table order, and the top 3 are kept. The neutral scenes' combined weight (if ≥ 0.10) becomes one `ambient` layer, and `ambient` at 0.5 is also the fallback when nothing qualifies. Each scene draws its random parameters from its own ChaCha8 stream, so a scene's look doesn't change when other scenes come and go.
@@ -177,7 +177,13 @@ Users can override a recipe by dropping an edited copy in `~/.config/coverwave/o
 - **Seamless loops:** all motion is a function of `phase = (frame mod L) / L`, with `L = loop_frames`. Speeds are integer `cycles` per loop, sway is `sin(2π·cycles·phase + seed_phase)`, and particles wrap on a torus whose period divides `L`. Frame `L` is identical to frame `0`, which a test checks.
 - **Audio never touches timing.** Audio bands only scale *amplitude* (intensity, density, brightness, pulse) and never phase or speed. The loop stays seamless and the beat is still visible.
 - **Change budget (soft):** about 25% of cells may change per frame, rising linearly to 40% when `energy > 0.7`. On a beat the budget widens by up to 35 points (capped at 75%) and shrinks back as the onset decays, so hits read clearly. If a frame goes over budget, the lowest-intensity layer's changes are dropped first; the beat ring outranks every layer. Originally 15%/30%; raised on 2026-11-24 because the owner wanted more motion and beat response. The diff is computed against the previous frame anyway for terminal output.
-- **Beat ring:** each onset sends a soft ring of the palette's lightest colour outward from the subject's edge across the cover, brightening existing glyphs only. Its radius follows the decaying onset envelope, so it is pure and never affects the loop.
+- **Beat shockwave:** each onset sends a ring of the palette's lightest colour outward from the subject's edge across the cover. Its crest brightens glyphs and packs them one or two steps denser. Its radius follows the decaying onset envelope, so it is pure and never affects the loop.
+- **Stage effects** (every cover, strength `0.6 + 0.6 * energy`, added 2026-11-24 when the owner asked for more and cooler motion):
+  - *Ambient glow*: the margins beside the cover fill with a stippled bloom of the cover's edge colours, reaching further with level and on beats (quantised so it does not churn).
+  - *Bass thump*: on kicks the background is pushed up to two cells outward from the subject, like a speaker cone.
+  - *Margin equaliser*: six bands rise from the bottom of each side margin (bass next to the cover) when margins are at least 13 cells wide.
+  - *Glitch slices*: on the hardest hits (onset > 0.8, level > 0.45) of energetic covers, two or three slices shift sideways in the accent for a couple of frames; which hits glitch comes from the seed and beat count.
+- **Owners in the limiter:** beat effects (shockwave, thump, glitch) outrank every layer; glow and equaliser are dropped first.
   *As built in M5:* layers are designed to stay within budget on their own under steady audio (a test checks every frame of the loop for 12 random recipes, at silence and at full level). Changes that are only colour are quantised (fog levels, heat palette steps, flicker on/off), so only boundaries move. `limit_changes(scene, prev, next)` is the safety net for sudden audio jumps. It is a pure function of the previous output, and each cell carries the id of the layer that drew it, so the weakest layer is reverted first. `render` itself never sees history, which keeps `render(L) == render(0)` exact.
 
 ---

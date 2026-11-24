@@ -5,6 +5,9 @@ Terminal music player in Rust. It renders the album cover as ASCII, and each cov
 ## Status
 M0 (workspace + TUI shell), M1 (local playback), M2 (static ASCII album art), M3 (audio analysis), M4 (cover analysis -> recipe JSON), M5 (recipe-driven renderer, all layer kinds) and M6 (library, search, queue, playlists, lyrics) done. M7 (system capture + Spotify + Apple Music) is built and tested on Linux. Its macOS code (Core Audio tap, AppleScript, keychain) is type-checked only and awaits the owner's Mac (LOCAL_TODO.md). M8 (Windows) is built: paths, colour and browser handling, and a CI workflow. It is unverified on real Windows because the CI is manual-only and has not run yet. All eight milestones are now built. Hands-on checks waiting for the owner are listed in LOCAL_TODO.md. The shipped `assets/pca.bin` is provisional (87 covers); see PLAN.md section 15. Track progress against the milestone table in PLAN.md section 13. Crates are only added when their milestone starts. The workspace currently holds `cw-core` (shared types, colour maths, play queue, `Recipe`), `cw-analysis` (cover decode, seed, palette, MobileCLIP via tract, features, subject mask, PCA, recipe mapping), `cw-render` (idle scene, static base art, `prepare`/`render`/`limit_changes` for recipe motion), `cw-audio` (decode/resample/playback, cover-art lookup, FFT/onset analyser), `cw-library` (SQLite index, fuzzy search, m3u8 playlists, lyrics, saved queue), `cw-capture` (system audio: macOS process tap, cpal loopback/input elsewhere), `cw-sources` (Spotify Web API with PKCE, Apple Music via osascript, `RemoteHandle` polling threads), `cw-tui` (also config, model download, recipe cache, library browser) and `tools/pca-fit`.
 
+## Terminal hygiene (cw-tui/src/term.rs)
+- stderr is redirected to `~/.cache/coverwave/coverwave.log` while the UI runs, and frames are drawn inside synchronized updates. Never print to stdout/stderr from library code, and give child processes null stdio, or the screen gets corrupted. ctrl-l forces a full repaint.
+
 ## Commands
 - Run: `cargo run -p cw-tui --release -- <files or folders>` (`?` shows keys in the app)
 - Check: `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
@@ -50,7 +53,9 @@ M0 (workspace + TUI shell), M1 (local playback), M2 (static ASCII album art), M3
   - Every animation loops seamlessly over `loop_frames` (integer `cycles`, phase-based).
   - Audio only modulates amplitude, never phase or speed.
   - A soft change budget keeps motion from turning into noise: about 25% of cells per frame steady (40% for high-energy covers), and beats may burst well past it (up to 75%), decaying with the beat. These are tuning values, not design rules: the owner wants lively, beat-driven motion (2026-11-24).
-  - Beats show as a ring of light that starts at the subject's edge and expands as the hit decays (`beat_ring` in `cw-render/src/scene.rs`). Keep beat effects spatial and anchored to the art, not full-screen flashes.
+  - Beats show as a shockwave that starts at the subject's edge and expands as the hit decays (`beat_ring` in `cw-render/src/scene.rs`), plus a bass thump, glitch slices on the hardest hits, and lightning on some beats for dark/ocean covers. Keep beat effects spatial and anchored to the art, not full-screen flashes (photosensitivity).
+  - Stage effects (margin glow, equaliser, thump, glitch) apply to every cover with strength from the cover's energy; per-cover character still comes only from recipe layers. Recipe version 2 added `aurora`, `starfield`, `digital_rain` and `lightning`.
+  - Event effects (lightning, glitch) choose which beats fire from `hash(seed, onset_count)`, so the renderer stays pure.
   - Motion eases to still while playback is paused and back on resume (`App::motion_level`).
 - The audio callback thread never allocates or locks. It hands samples to other threads through a lock-free ring buffer (`rtrb`).
 

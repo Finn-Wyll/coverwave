@@ -164,13 +164,20 @@ fn scene_layers(index: usize, w: f32, g: &Global, seed: u64) -> Vec<Layer> {
         ChaCha8Rng::seed_from_u64(seed ^ (0x9E37_79B9_7F4A_7C15u64.wrapping_mul(index as u64 + 1)));
     let s = g.speed;
     match SCENES[index] {
-        "snow" => vec![Layer::FallingParticles {
-            intensity: w,
-            density: g.density,
-            fall_cycles: cycles(2.0, s),
-            drift_deg: g.wind_deg,
-            glyphs: ".*+".into(),
-        }],
+        "snow" => vec![
+            Layer::FallingParticles {
+                intensity: w,
+                density: g.density,
+                fall_cycles: cycles(2.0, s),
+                drift_deg: g.wind_deg,
+                glyphs: ".*+".into(),
+            },
+            Layer::Aurora {
+                intensity: round3(w * 0.7),
+                bands: 1 + (g.density * 2.0).round() as u32,
+                cycles: cycles(1.0, s),
+            },
+        ],
         "lava" => vec![
             Layer::HeatCycle {
                 intensity: w,
@@ -184,6 +191,15 @@ fn scene_layers(index: usize, w: f32, g: &Global, seed: u64) -> Vec<Layer> {
             },
         ],
         "very dark scene" => vec![
+            Layer::Starfield {
+                intensity: w,
+                count: 30 + (g.density * 90.0).round() as u32,
+                cycles: cycles(1.0, s),
+            },
+            Layer::Lightning {
+                intensity: w,
+                chance: pick(&mut rng, 0.2, 0.45),
+            },
             Layer::Flicker {
                 intensity: w,
                 rate: g.flicker_rate,
@@ -209,18 +225,29 @@ fn scene_layers(index: usize, w: f32, g: &Global, seed: u64) -> Vec<Layer> {
                 blink_cycles: cycles(3.0, s),
             },
         ],
-        "ocean" => vec![Layer::Ripple {
-            intensity: w,
-            amplitude: round3(g.sway * 1.5),
-            wavelength: pick(&mut rng, 6.0, 14.0),
-            cycles: cycles(2.0, s),
-            direction_deg: round3(g.wind_deg - 90.0),
-        }],
+        "ocean" => vec![
+            Layer::Ripple {
+                intensity: w,
+                amplitude: round3(g.sway * 1.5),
+                wavelength: pick(&mut rng, 6.0, 14.0),
+                cycles: cycles(2.0, s),
+                direction_deg: round3(g.wind_deg - 90.0),
+            },
+            Layer::Lightning {
+                intensity: round3(w * 0.6),
+                chance: pick(&mut rng, 0.1, 0.25),
+            },
+        ],
         "city at night" => vec![
             Layer::NeonFlicker {
                 intensity: w,
                 cells: pick(&mut rng, 0.01, 0.04),
                 rate: g.flicker_rate,
+            },
+            Layer::DigitalRain {
+                intensity: w,
+                density: round3(0.25 + 0.5 * g.density),
+                fall_cycles: cycles(2.0, s),
             },
             Layer::Rain {
                 intensity: w,
@@ -242,12 +269,24 @@ fn scene_layers(index: usize, w: f32, g: &Global, seed: u64) -> Vec<Layer> {
                 cycles: cycles(1.0, s),
             },
         ],
-        "sky" => vec![Layer::CloudDrift {
-            intensity: w,
-            layers: 1 + (g.density * 4.0).round().min(2.0) as u32,
-            cycles: cycles(1.0, s),
-            softness: pick(&mut rng, 0.4, 0.8),
-        }],
+        "sky" => vec![
+            Layer::CloudDrift {
+                intensity: w,
+                layers: 1 + (g.density * 4.0).round().min(2.0) as u32,
+                cycles: cycles(1.0, s),
+                softness: pick(&mut rng, 0.4, 0.8),
+            },
+            Layer::Aurora {
+                intensity: round3(w * 0.8),
+                bands: 1 + (g.density * 2.0).round() as u32,
+                cycles: cycles(1.0, s),
+            },
+            Layer::Starfield {
+                intensity: round3(w * 0.5),
+                count: 20 + (g.density * 50.0).round() as u32,
+                cycles: cycles(1.0, s),
+            },
+        ],
         _ => vec![],
     }
 }
@@ -299,7 +338,9 @@ mod tests {
             [0.0; DNA_DIMS],
         ));
         let kinds: Vec<&str> = r.layers.iter().map(Layer::kind).collect();
-        assert_eq!(kinds, ["ripple", "neon_flicker", "rain"]);
+        // Ocean's lightning (0.6 x 0.5) ties city's layers (0.3) and keeps
+        // table order, so it comes first among them.
+        assert_eq!(kinds, ["ripple", "lightning", "neon_flicker"]);
         assert_eq!(r.layers[0].intensity(), 0.5);
     }
 
@@ -315,7 +356,10 @@ mod tests {
             [0.0; DNA_DIMS],
         ));
         let kinds: Vec<(&str, f32)> = r.layers.iter().map(|l| (l.kind(), l.intensity())).collect();
-        assert_eq!(kinds, [("ambient", 0.6), ("ripple", 0.3)]);
+        assert_eq!(
+            kinds,
+            [("ambient", 0.6), ("ripple", 0.3), ("lightning", 0.18)]
+        );
     }
 
     #[test]
