@@ -18,9 +18,6 @@ pub(super) struct Glitch {
     shift: i32,
 }
 
-/// A lightning bolt: (x, y, glyph) cells from top to bottom.
-pub(super) type Bolt = Vec<(u16, u16, char)>;
-
 #[derive(Debug, Clone)]
 pub(super) enum Extra {
     PulseRings {
@@ -49,37 +46,16 @@ pub(super) enum Extra {
     RowGlitch {
         events: Vec<Glitch>,
     },
-    CodeRain {
-        cols: Vec<(u16, f32, i32, u16)>,
-        glyph_seed: u64,
-        color: Rgb,
-    },
     ChromaShift {
         cycles: i32,
         offset: i32,
         band: f32,
-    },
-    Lightning {
-        strikes: Vec<(f32, Bolt)>,
-        duration: f32,
-        color: Rgb,
-    },
-    Aurora {
-        bands: Vec<(f32, f32, f32, i32, f32)>,
-        color: Rgb,
     },
     SunRays {
         rays: u32,
         cycles: i32,
         ox: f32,
         oy: f32,
-        color: Rgb,
-    },
-    Starfield {
-        stars: Vec<(f32, f32, i32)>,
-        cx: f32,
-        cy: f32,
-        max_r: f32,
         color: Rgb,
     },
     Twinkle {
@@ -104,12 +80,7 @@ pub(super) enum Extra {
 pub(super) fn pass(e: &Extra) -> usize {
     match e {
         Extra::RowGlitch { .. } => 0,
-        Extra::CodeRain { .. }
-        | Extra::Starfield { .. }
-        | Extra::Twinkle { .. }
-        | Extra::Orbit { .. }
-        | Extra::EqBars { .. }
-        | Extra::Lightning { .. } => 2,
+        Extra::Twinkle { .. } | Extra::Orbit { .. } | Extra::EqBars { .. } => 2,
         _ => 1,
     }
 }
@@ -251,28 +222,6 @@ pub(super) fn prepare(layer: &Layer, c: &PrepCtx<'_>, rng: &mut ChaCha8Rng) -> O
                 .collect();
             Effect::Extra(Extra::RowGlitch { events })
         }
-        Layer::CodeRain {
-            density,
-            fall_cycles,
-            ..
-        } => {
-            let n = ((density.clamp(0.0, 1.0) * art.w as f32 * 0.35) as usize).max(1);
-            let cols = (0..n)
-                .map(|_| {
-                    (
-                        art.x + (unit(rng) * art.w.max(1) as f32) as u16,
-                        unit(rng) * h,
-                        fall_cycles.clamp(1, 4) as i32 * (1 + (unit(rng) < 0.3) as i32),
-                        3 + (unit(rng) * 4.0) as u16,
-                    )
-                })
-                .collect();
-            Effect::Extra(Extra::CodeRain {
-                cols,
-                glyph_seed: rng.next_u64(),
-                color: c.soft(c.accent, 62.0),
-            })
-        }
         Layer::ChromaShift { cycles, offset, .. } => Effect::Extra(Extra::ChromaShift {
             cycles: cycles.clamp(1, 3) as i32,
             offset: offset.clamp(1, 3) as i32,
@@ -385,55 +334,6 @@ pub(super) fn prepare(layer: &Layer, c: &PrepCtx<'_>, rng: &mut ChaCha8Rng) -> O
                 colors: [grey, c.soft(grey, 48.0), c.soft(grey, 56.0)],
             })
         }
-        Layer::Lightning { strikes, .. } => {
-            let strikes = (0..strikes.clamp(1, 4))
-                .map(|_| {
-                    let start = unit(rng);
-                    let mut x = art.x as i32 + (unit(rng) * art.w.max(1) as f32) as i32;
-                    let len = ((0.4 + unit(rng) * 0.4) * art.h as f32) as u16;
-                    let mut path = Vec::new();
-                    for y in art.y..(art.y + len).min(art.y + art.h) {
-                        let step = (unit(rng) * 3.0) as i32 - 1;
-                        let glyph = match step {
-                            -1 => '/',
-                            1 => '\\',
-                            _ => '|',
-                        };
-                        x = (x + step).clamp(art.x as i32, (art.x + art.w).max(1) as i32 - 1);
-                        path.push((x as u16, y, glyph));
-                    }
-                    (start, path)
-                })
-                .collect();
-            Effect::Extra(Extra::Lightning {
-                strikes,
-                duration: frame * 3.0,
-                color: c.soft(lightest, 95.0),
-            })
-        }
-        Layer::Aurora { bands, cycles, .. } => {
-            let bands = (0..bands.clamp(1, 3))
-                .map(|b| {
-                    (
-                        0.12 + 0.12 * b as f32,
-                        1.0 + unit(rng) * 2.0,
-                        18.0 + unit(rng) * 20.0,
-                        cycles.clamp(1, 2) as i32 * if b % 2 == 0 { 1 } else { -1 },
-                        unit(rng) * TAU,
-                    )
-                })
-                .collect();
-            let chroma = c
-                .palette
-                .iter()
-                .copied()
-                .max_by(|a, b| Lab::from(*a).chroma().total_cmp(&Lab::from(*b).chroma()))
-                .unwrap_or(c.accent);
-            Effect::Extra(Extra::Aurora {
-                bands,
-                color: c.soft(chroma, 62.0),
-            })
-        }
         Layer::SunRays { rays, cycles, .. } => {
             let left = unit(rng) < 0.5;
             Effect::Extra(Extra::SunRays {
@@ -446,28 +346,6 @@ pub(super) fn prepare(layer: &Layer, c: &PrepCtx<'_>, rng: &mut ChaCha8Rng) -> O
                 },
                 oy: art.y as f32 - 3.0,
                 color: c.soft(lightest, 88.0),
-            })
-        }
-        Layer::Starfield {
-            density, cycles, ..
-        } => {
-            let (cx, cy, max_r) = centre(c);
-            let n = count(density);
-            let stars = (0..n)
-                .map(|_| {
-                    (
-                        unit(rng) * TAU,
-                        unit(rng),
-                        cycles.clamp(1, 2) as i32 * (1 + (unit(rng) < 0.3) as i32),
-                    )
-                })
-                .collect();
-            Effect::Extra(Extra::Starfield {
-                stars,
-                cx,
-                cy,
-                max_r: max_r * 1.6,
-                color: c.soft(lightest, 80.0),
             })
         }
         Layer::Twinkle {
@@ -532,13 +410,6 @@ pub(super) fn prepare(layer: &Layer, c: &PrepCtx<'_>, rng: &mut ChaCha8Rng) -> O
         _ => return None,
     };
     Some(effect)
-}
-
-/// A per-cell glyph for code rain, fixed so trails do not flicker.
-fn rain_glyph(seed: u64, x: u16, y: u16) -> char {
-    const G: &[char] = &['0', '1', '|', ':', ';', '!', '<', '>', '+', '=', '*'];
-    let h = seed ^ ((x as u64) << 32 | y as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    G[(h >> 59) as usize % G.len()]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -720,29 +591,6 @@ pub(super) fn draw(
                 }
             }
         }
-        Extra::CodeRain {
-            cols,
-            glyph_seed,
-            color,
-        } => {
-            let head_color = color.lerp(accent, 0.5 + 0.3 * audio.onset.clamp(0.0, 1.0));
-            for &(x, y0, ky, trail) in cols {
-                let head = (y0 + ky as f32 * h as f32 * phase).rem_euclid(h as f32) as i32;
-                let trail = ((trail as f32) * amp.min(1.2)).round().max(1.0) as i32;
-                for k in 0..trail {
-                    let y = (head - k).rem_euclid(h as i32) as usize;
-                    let i = y * w + x as usize;
-                    let cell = grid.cells()[i];
-                    let fg = if k == 0 {
-                        head_color
-                    } else {
-                        color.lerp(scene.background, k as f32 / (trail + 1) as f32)
-                    };
-                    let ch = rain_glyph(*glyph_seed, x, y as u16);
-                    set(scene, grid, owner, i, Cell { ch, fg, ..cell }, id);
-                }
-            }
-        }
         Extra::ChromaShift {
             cycles,
             offset,
@@ -786,49 +634,6 @@ pub(super) fn draw(
                 }
             }
         }
-        Extra::Lightning {
-            strikes,
-            duration,
-            color,
-        } => {
-            for (start, path) in strikes {
-                if frac(phase - start) >= *duration {
-                    continue;
-                }
-                let fg = scene.background.lerp(*color, (0.5 + 0.5 * amp).min(1.0));
-                for &(x, y, ch) in path {
-                    let i = y as usize * w + x as usize;
-                    let cell = grid.cells()[i];
-                    set(scene, grid, owner, i, Cell { ch, fg, ..cell }, id);
-                }
-            }
-        }
-        Extra::Aurora { bands, color } => {
-            let mix = (0.3 * amp).min(0.5);
-            for &(row, amplitude, wavelength, cycles, ph) in bands {
-                for x in 0..w {
-                    let top = row * h as f32
-                        + amplitude
-                            * (TAU * (x as f32 / wavelength + cycles as f32 * phase) + ph).sin();
-                    let top = top.round() as i32;
-                    for k in 0..3 {
-                        let y = top + k;
-                        if y < 0 || y as usize >= h {
-                            continue;
-                        }
-                        let i = y as usize * w + x;
-                        let mut cell = grid.cells()[i];
-                        if cell.ch == ' ' {
-                            cell.ch = if k == 0 { ':' } else { '.' };
-                            cell.fg = scene.background.lerp(*color, 0.4 + mix - 0.12 * k as f32);
-                        } else {
-                            cell.fg = cell.fg.lerp(*color, mix * (1.0 - 0.3 * k as f32));
-                        }
-                        set(scene, grid, owner, i, cell, id);
-                    }
-                }
-            }
-        }
         Extra::SunRays {
             rays,
             cycles,
@@ -862,40 +667,6 @@ pub(super) fn draw(
                         );
                     }
                 }
-            }
-        }
-        Extra::Starfield {
-            stars,
-            cx,
-            cy,
-            max_r,
-            color,
-        } => {
-            for &(angle, r0, k) in stars {
-                let r = frac(r0 + k as f32 * phase);
-                let (x, y) = (
-                    cx + angle.cos() * r * max_r / ASPECT,
-                    cy + angle.sin() * r * max_r,
-                );
-                if x < 0.0 || y < 0.0 || x >= w as f32 || y >= h as f32 {
-                    continue;
-                }
-                let i = y as usize * w + x as usize;
-                if scene.density[i] > 0.35 {
-                    continue; // only over dark areas
-                }
-                let ch = if r < 0.35 {
-                    '.'
-                } else if r < 0.7 {
-                    '+'
-                } else {
-                    '*'
-                };
-                let fg = scene
-                    .background
-                    .lerp(*color, (0.4 + 0.6 * r) * amp.min(1.0));
-                let cell = grid.cells()[i];
-                set(scene, grid, owner, i, Cell { ch, fg, ..cell }, id);
             }
         }
         Extra::Twinkle { stars, color } => {

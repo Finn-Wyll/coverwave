@@ -912,6 +912,7 @@ dependencies = [
  "cw-render",
  "cw-sources",
  "image",
+ "libc",
  "ratatui",
  "rtrb",
  "serde",

@@ -163,8 +163,10 @@ fn encode_embedding(e: &[f32]) -> Vec<u8> {
 
 fn decode_embedding(b: &[u8]) -> Option<Vec<f32>> {
     (b.len() == EMBED_DIM * 4).then(|| {
-        b.chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        b.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect()
     })
 }

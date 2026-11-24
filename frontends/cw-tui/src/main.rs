@@ -9,7 +9,9 @@ mod cover;
 mod models;
 mod paths;
 mod recipes;
+mod remote_browse;
 mod sources;
+mod term;
 mod ui;
 
 use anyhow::{Context, Result, bail};
@@ -233,6 +235,11 @@ fn main() -> Result<()> {
     // `ratatui::init` enters the alternate screen + raw mode and installs a
     // panic hook that restores the terminal before the panic message prints.
     let mut terminal = ratatui::init();
+    // Native code (CoreAudio and friends) may print to stderr, which would
+    // scribble over the UI; send it to a log while the UI is up.
+    let stderr_log = paths::dir(paths::Kind::Cache)
+        .and_then(|d| term::StderrToLog::start(&d.join("coverwave.log")));
+    term::hook_panics();
     // The model loads (or downloads, once) in the background; covers get
     // neutral recipes until it is ready.
     let recipes = cover::RecipeContext {
@@ -249,10 +256,12 @@ fn main() -> Result<()> {
         app.say(warnings.join("; "));
     }
     app.measure_cell_aspect();
+    app.stderr_log = stderr_log.as_ref().map(|g| g.path.clone());
     let result = run(&mut terminal, &mut app);
     app.tick(); // a final snapshot for the saved queue
     app.save_queue();
     ratatui::restore();
+    drop(stderr_log); // stderr back on the terminal for any error below
     result
 }
 
@@ -262,7 +271,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
 
     while !app.should_quit {
         app.tick();
-        terminal.draw(|f| ui::draw(f, app))?;
+        if app.take_redraw_request() {
+            terminal.clear()?; // ctrl-l: repaint every cell
+        }
+        term::draw_synced(terminal, |f| ui::draw(f, app))?;
         app.on_frame_drawn(Instant::now());
 
         // Fixed timestep: schedule from the previous deadline, not from "now",

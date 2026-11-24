@@ -75,6 +75,7 @@ fn pool(scene: &str) -> &'static [(&'static str, f32)] {
             ("flicker", 0.6),
             ("twinkle", 0.4),
             ("starfield", 0.5),
+            ("lightning", 0.3),
             ("smoke", 0.4),
             ("light_sweep", 0.3),
         ],
@@ -84,15 +85,26 @@ fn pool(scene: &str) -> &'static [(&'static str, f32)] {
             ("row_sway", 0.7),
             ("sun_rays", 0.5),
         ],
-        "ocean" => &[("ripple", 1.0), ("bubbles", 0.5), ("light_sweep", 0.3)],
+        "ocean" => &[
+            ("ripple", 1.0),
+            ("bubbles", 0.5),
+            ("light_sweep", 0.3),
+            ("lightning", 0.3),
+        ],
         "city at night" => &[
             ("neon_flicker", 0.8),
             ("rain", 0.7),
+            ("digital_rain", 0.6),
             ("scanlines", 0.4),
             ("light_sweep", 0.3),
         ],
         "desert" => &[("heat_shimmer", 0.8), ("dust", 0.8), ("sun_rays", 0.6)],
-        "sky" => &[("cloud_drift", 0.9), ("sun_rays", 0.5), ("starfield", 0.3)],
+        "sky" => &[
+            ("cloud_drift", 0.9),
+            ("sun_rays", 0.5),
+            ("aurora", 0.4),
+            ("starfield", 0.3),
+        ],
         "space" => &[
             ("starfield", 1.0),
             ("twinkle", 0.8),
@@ -453,9 +465,9 @@ pub fn make_layer(kind: &str, w: f32, g: &Global, seed: u64) -> Layer {
             events: 2 + (g.flicker_rate * 8.0).round() as u32,
             max_shift: 2 + (unit(rng) * 3.0) as u32,
         },
-        "code_rain" => Layer::CodeRain {
+        "digital_rain" => Layer::DigitalRain {
             intensity: w,
-            density: g.density,
+            density: round3(0.25 + 0.5 * g.density),
             fall_cycles: cycles(2.0, s),
         },
         "chroma_shift" => Layer::ChromaShift {
@@ -476,11 +488,11 @@ pub fn make_layer(kind: &str, w: f32, g: &Global, seed: u64) -> Layer {
         },
         "lightning" => Layer::Lightning {
             intensity: w,
-            strikes: 1 + (g.flicker_rate * 4.0).round() as u32,
+            chance: pick(rng, 0.2, 0.45),
         },
         "aurora" => Layer::Aurora {
             intensity: w,
-            bands: 1 + (unit(rng) * 2.0) as u32,
+            bands: 1 + (g.density * 2.0).round() as u32,
             cycles: cycles(1.0, s),
         },
         "smoke" => Layer::Smoke {
@@ -495,7 +507,7 @@ pub fn make_layer(kind: &str, w: f32, g: &Global, seed: u64) -> Layer {
         },
         "starfield" => Layer::Starfield {
             intensity: w,
-            density: round3(g.density * 0.6),
+            count: 30 + (g.density * 90.0).round() as u32,
             cycles: cycles(1.0, s),
         },
         "twinkle" => Layer::Twinkle {

@@ -7,13 +7,21 @@ note anything that feels wrong; it can all be tuned.
 
 ## 0. Setup
 
-- [ ] `cargo run -p cw-tui --release` once. It writes
+- [x] The workspace builds on macOS 27 with no warnings, all 118 tests pass,
+      clippy is clean, and `cw-tui` embeds its Info.plist with both
+      permission strings (checked 2026-11-24).
+
+- [x] `cargo run -p cw-tui --release` once. It writes
       `~/.config/coverwave/config.toml` with comments.
-- [ ] Set `music_dirs` in that file to your music folders (default `~/Music`),
+- [x] Set `music_dirs` in that file to your music folders (default `~/Music`),
       then restart. The library title shows "scanning" and then the track
-      count.
-- [ ] The first run downloads the cover-analysis model (45MB, from
-      huggingface.co). Press `D` twice to see its progress. If your network
+      count. (2026-11-24: the default `~/Music` was right. The scan found 128
+      tracks in 52 artists and 94 albums, all with durations; 4 untagged
+      files went to "Unknown artist". 10 songs appear twice because the
+      Music library has "Song 1.mp3" copies.)
+- [x] The first run downloads the cover-analysis model (45MB, from
+      huggingface.co). (2026-11-24: downloaded 45.5MB and the SHA-256
+      matches the pinned value.) Press `D` twice to see its progress. If your network
       blocks it, download the file listed in
       `frontends/cw-tui/src/models.rs` yourself and set
       `COVERWAVE_MODEL=/path/to/vision_model.onnx`.
@@ -72,11 +80,20 @@ note anything that feels wrong; it can all be tuned.
 - [ ] Watch a handful of different covers for a full 8-second loop each.
       Does the motion support the art or compete with it? Name any layer
       that feels too busy (snow, rain, fog, ripple, heat, clouds, flicker,
-      neon, embers, dust, fireflies, sway, shimmer, ambient).
+      neon, embers, dust, fireflies, sway, shimmer, ambient, aurora,
+      starfield, digital rain, lightning).
+- [ ] Beat effects on real music: shockwave from the subject, bass thump,
+      glitch slices on big hits, margin glow and equaliser. Too much, too
+      little, or wrong on some genre? Tuning constants are at the top of
+      `crates/cw-render/src/scene.rs` (`RING_TINT`, `THUMP_CELLS`,
+      `BEAT_BURST`) and in `gain_intensity`.
+- [ ] Menus never get corrupted any more. If they do, press ctrl-l and
+      send the contents of `~/.cache/coverwave/coverwave.log`.
 - [ ] With `D`: `fps` holds at 30/30 at full screen, and `changed` stays at
-      about 15% or less.
-- [ ] `cargo bench -p cw-render --bench render` stays under 4ms
-      (0.5ms in the cloud).
+      about 25% or less between beats (beats may briefly go higher).
+- [x] `cargo bench -p cw-render --bench render` stays under 4ms
+      (0.5ms in the cloud; on this Mac 0.42ms, 0.72ms with the change
+      limiter, and 0.28ms for the new layers on a full beat, on 2026-11-24).
 - [ ] `m` turns motion off and on. Copy a recipe from
       `~/.cache/coverwave/recipes/<hash>.json` to
       `~/.config/coverwave/overrides/`, edit a layer, and press `R`.
@@ -128,10 +145,14 @@ Spotify server.
       "User Management", so add yourself.
 
 ### System-audio capture (riskiest: `crates/cw-capture/src/macos.rs`)
-- [ ] With Spotify playing, run
+- [x] With Spotify playing, run
       `cargo run -p cw-capture --example meter -- 10 com.spotify.client`.
       macOS should ask for "audio recording" permission. Then the bars should
-      move with the music. Try `com.apple.Music` with Music.app too.
+      move with the music. (2026-11-24: worked first time at 48000 Hz; bands
+      moved and onsets counted about 2.5 per second. Bars mostly sat at 70-100%
+      on loud masters. `RANGE_DB` was then tuned from 30 to 15 dB using
+      `examples/range_tune.rs` on the whole library.)
+- [ ] Try `com.apple.Music` with Music.app too.
 - [ ] If there is no prompt and only silence: check that
       `frontends/cw-tui/build.rs` embedded the Info.plist
       (`otool -s __TEXT __info_plist target/debug/cw-tui`). The meter example
@@ -145,11 +166,18 @@ Spotify server.
     `kAudioProcessPropertyBundleID`)
 - [ ] Capture must not change what you hear (the tap is "unmuted"), and must
       stop cleanly on quit. No "coverwave capture" device should be left in
-      Audio MIDI Setup.
+      Audio MIDI Setup. (Stopping cleanly and leaving no device behind were
+      verified 2026-11-24. Whether the sound changes still needs your ears.)
 - [ ] macOS 13–14.1 has no process taps; the ScreenCaptureKit fallback is not
       written yet (only needed if you are on an older macOS).
 
 ### Spotify in the TUI
+- [ ] Library: with Spotify active, `tab` shows Liked Songs, Playlists and
+      Albums. Log in again with `L` once (new permissions). `enter` opens or
+      plays, `/` filters, `backspace` goes back, `r` refreshes. Followed
+      playlists you do not own play whole (Spotify will not list them).
+- [ ] With the Spotify app closed, play something from the library:
+      coverwave should open Spotify in the background and start it there.
 - [ ] `S` → Spotify → "press L to log in" → `L` opens the browser → approve →
       the HUD shows what is playing, with the cover and its motion.
 - [ ] Quit and restart: still logged in (refresh token in the Keychain; look
@@ -158,8 +186,10 @@ Spotify server.
       nothing is playing anywhere, you get "no active Spotify device".
 - [ ] The progress bar moves smoothly between polls and corrects itself
       after a seek.
-- [ ] The cover reacts to the music (captured), not only gentle default
-      motion. `D` shows `capture on, 48000 Hz`.
+- [x] The cover reacts to the music (captured), not only gentle default
+      motion. `D` shows `capture on, 48000 Hz`. (2026-11-24: capture ran but
+      heard silence until the owner granted the missing permission in System
+      Settings > Privacy & Security > Screen & System Audio Recording.)
 
 ### Apple Music (`crates/cw-sources/src/apple_music.rs`)
 - [ ] `S` → Apple Music: macOS asks whether your terminal may control Music

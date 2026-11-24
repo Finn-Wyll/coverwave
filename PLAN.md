@@ -120,22 +120,22 @@ Analysis budget: under 300ms per new cover on an M-series Mac, and under 5ms on 
 ### Effect layers (one per scene)
 | Scene | Layer | Core parameters |
 |---|---|---|
-| snow | `falling_particles` | density, fall speed, drift, glyphs `. * +` |
+| snow | `falling_particles` + `aurora` | density, fall speed, drift, glyphs `. * +`; curtain count |
 | lava | `heat_cycle` + `embers` | noise scale, palette cycle speed, ember rise rate |
-| very dark | `flicker` + `fog` | flicker rate, fog density, fog drift vector |
+| very dark | `starfield` + `lightning` + `flicker` + `fog` | star count; strike chance; flicker rate; fog density and drift |
 | forest | `row_sway` + `fireflies` | sway amplitude, wavelength, firefly count/blink |
-| ocean | `ripple` | displacement amplitude, wavelength, direction |
-| city at night | `neon_flicker` + `rain` | flicker cells/rate, rain angle, density |
+| ocean | `ripple` + `lightning` | displacement amplitude, wavelength, direction; strike chance |
+| city at night | `neon_flicker` + `digital_rain` + `rain` | flicker cells/rate; column density; rain angle, density |
 | desert | `heat_shimmer` + `dust` | shimmer amplitude, dust drift |
-| sky | `cloud_drift` | layer count, drift speed, softness |
+| sky | `cloud_drift` + `aurora` + `starfield` | layer count, drift speed, softness; curtains; stars |
 
-### Selection v2 (recipe version 2, after M8)
+### Selection v2 (recipe version 3, after M8)
 
 The owner reported getting "the same animation every song". The cause: one fixed effect per scene, and most covers read as "very dark" or neutral. On the 87 playlist covers, about two-thirds got `flicker + fog`, `ambient`, or both. v2 changes three things:
 
 - **More kinds.** 17 new layer kinds in four families, 31 in total, all held to the same constraints (seam, protection and budget tests run per kind, plus a perf bench case):
   - **Beat & pulse:** `pulse_rings`, `subject_glow` (a highlight travelling round the subject), `eq_bars`.
-  - **Electronic & glitch:** `scanlines`, `row_glitch`, `code_rain`, `chroma_shift`.
+  - **Electronic & glitch:** `scanlines`, `row_glitch`, `digital_rain`, `chroma_shift`. (The owner's local branch added `aurora`, `starfield`, `digital_rain` and `lightning` at the same time; the merge kept those four implementations, and the selection pools use them.)
   - **Nature & weather:** `falling_leaves`, `bubbles`, `lightning`, `aurora`, `smoke`, `sun_rays`.
   - **Space & light:** `starfield`, `twinkle` (dark cells only), `orbit`, `light_sweep`.
 - **More scenes.** `space`, `storm`, `garden`, `party` and `underwater` (prompts version 2). Each scene now offers a **pool** of kinds with affinities (`mapping::pool`).
@@ -195,7 +195,14 @@ Users can override a recipe by dropping an edited copy in `~/.config/coverwave/o
 - **Subject protection:** cells in the subject mask, and every HUD/title cell, are never displaced or overwritten. Particles draw behind them (z-order: background art < effects < subject < HUD).
 - **Seamless loops:** all motion is a function of `phase = (frame mod L) / L`, with `L = loop_frames`. Speeds are integer `cycles` per loop, sway is `sin(2π·cycles·phase + seed_phase)`, and particles wrap on a torus whose period divides `L`. Frame `L` is identical to frame `0`, which a test checks.
 - **Audio never touches timing.** Audio bands only scale *amplitude* (intensity, density, brightness, pulse) and never phase or speed. The loop stays seamless and the beat is still visible.
-- **Change budget:** at most about 15% of cells may change per frame. That rises linearly to 30% when `energy > 0.7`. If a frame goes over budget, the lowest-intensity layer's changes are dropped first. The diff is computed against the previous frame anyway for terminal output.
+- **Change budget (soft):** about 25% of cells may change per frame, rising linearly to 40% when `energy > 0.7`. On a beat the budget widens by up to 35 points (capped at 75%) and shrinks back as the onset decays, so hits read clearly. If a frame goes over budget, the lowest-intensity layer's changes are dropped first; the beat ring outranks every layer. Originally 15%/30%; raised on 2026-11-24 because the owner wanted more motion and beat response. The diff is computed against the previous frame anyway for terminal output.
+- **Beat shockwave:** each onset sends a ring of the palette's lightest colour outward from the subject's edge across the cover. Its crest brightens glyphs and packs them one or two steps denser. Its radius follows the decaying onset envelope, so it is pure and never affects the loop.
+- **Stage effects** (every cover, strength `0.6 + 0.6 * energy`, added 2026-11-24 when the owner asked for more and cooler motion):
+  - *Ambient glow*: the margins beside the cover fill with a stippled bloom of the cover's edge colours, reaching further with level and on beats (quantised so it does not churn).
+  - *Bass thump*: on kicks the background is pushed up to two cells outward from the subject, like a speaker cone.
+  - *Margin equaliser*: six bands rise from the bottom of each side margin (bass next to the cover) when margins are at least 13 cells wide.
+  - *Glitch slices*: on the hardest hits (onset > 0.8, level > 0.45) of energetic covers, two or three slices shift sideways in the accent for a couple of frames; which hits glitch comes from the seed and beat count.
+- **Owners in the limiter:** beat effects (shockwave, thump, glitch) outrank every layer; glow and equaliser are dropped first.
   *As built in M5:* layers are designed to stay within budget on their own under steady audio (a test checks every frame of the loop for 12 random recipes, at silence and at full level). Changes that are only colour are quantised (fog levels, heat palette steps, flicker on/off), so only boundaries move. `limit_changes(scene, prev, next)` is the safety net for sudden audio jumps. It is a pure function of the previous output, and each cell carries the id of the layer that drew it, so the weakest layer is reverted first. `render` itself never sees history, which keeps `render(L) == render(0)` exact.
 
 ---
@@ -272,6 +279,9 @@ trait SystemCapture { fn start(&mut self, sink: Producer<f32>) -> Result<()>; fn
 
 - **Local:** scan configured folders (`walkdir`), read tags and embedded art with `lofty`, and fall back to `cover.jpg`/`folder.png` in the same folder. Watch for changes with `notify`.
 - **Spotify:** Web API with OAuth PKCE (client ID in the config, no secret). It provides now-playing, play/pause/next/prev/seek/volume and cover URLs. Playback control needs a **Premium** account. Tokens are stored in the OS keychain (`keyring`).
+  - **Library (added 2026-11-24):** with Spotify active, Library mode browses Liked Songs, Playlists and Albums (`/me/tracks`, `/me/playlists`, `/me/albums`, `/playlists/{id}/items`, `/albums/{id}/tracks`; up to 1000 rows per listing, cached 5 minutes) and plays through `PUT /me/player/play` with a context URI, an offset URI, or a list of up to 100 track URIs. Uses the February 2026 Development Mode API: playlist entries carry `item` (old `track` is still read), and only playlists the user owns or collaborates on can be listed, so followed playlists play whole instead of opening.
+  - **Device pickup:** when Spotify answers 404 (no active device), coverwave lists devices, prefers the active one, then a computer, then any; on macOS it opens the Spotify app in the background if there are none and waits up to 10s. Playback moves there and the command is retried once.
+  - Scopes: playback ones plus `playlist-read-private playlist-read-collaborative user-library-read`. Older logins get a "press L to log in again" message on library calls.
 - **Apple Music (macOS):** controls Music.app via `osascript`/AppleScript (state, track, artwork export, transport). The MusicKit web API for catalogue/library access is optional and later, since it needs an Apple Developer token.
 - A shared `Source` trait means the UI never cares which source is active.
 

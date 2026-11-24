@@ -31,5 +31,9 @@ name = "probe"
 required-features = ["playback"]
 
 [[example]]
+name = "range_tune"
+required-features = ["playback"]
+
+[[example]]
 name = "tempo"
 required-features = ["playback"]

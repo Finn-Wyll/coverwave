@@ -1,5 +1,6 @@
 use crate::browse::{Action, Browser};
 use crate::cover::{CoverEntry, CoverLoader, RecipeContext, Slot};
+use crate::remote_browse::{RemoteAction, RemoteBrowser};
 use crate::sources::{SourceKind, Sources};
 use cw_analysis::GenreFamily;
 use cw_audio::{Player, Snapshot};
@@ -115,6 +116,12 @@ pub struct ArtCache {
 
 /// Frames over which a new recipe's motion fades in (1s at 30fps).
 pub const FADE_FRAMES: u32 = 30;
+/// Frames over which one cover dissolves into the next (about 0.4s).
+pub const DISSOLVE_FRAMES: u32 = 12;
+/// How quickly motion settles when playback pauses, and returns when it
+/// resumes (time constants in seconds; about 3x this to fully settle).
+const SETTLE_SECS: f32 = 0.25;
+const RESUME_SECS: f32 = 0.12;
 
 /// What the `D` overlay shows; `D` cycles through them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +219,18 @@ pub struct App {
     /// The cover entry whose motion is fading in, and the frame it started.
     pub fade_entry: u64,
     pub fade_start: u32,
+    /// 0..1: how much motion is running. Eases to 0 while paused so the
+    /// art settles to still, and back to 1 on resume.
+    pub motion_level: f32,
+    /// The frame shown before a cover change and when the change began,
+    /// for the dissolve into the new cover.
+    pub dissolve: Option<(cw_core::CellGrid, u32)>,
+    /// Set by ctrl-l: repaint the whole screen on the next frame.
+    redraw_requested: bool,
+    /// Where stderr is logged while the UI runs (debug overlay).
+    pub stderr_log: Option<PathBuf>,
+    /// The Spotify library view (Library mode while Spotify is active).
+    pub remote_browser: RemoteBrowser,
     frame_times: VecDeque<Instant>,
 }
 
@@ -268,7 +287,49 @@ impl App {
             motion: settings.motion,
             fade_entry: 0,
             fade_start: 0,
+            motion_level: 1.0,
+            dissolve: None,
+            redraw_requested: false,
+            stderr_log: None,
+            remote_browser: RemoteBrowser::new(),
             frame_times: VecDeque::with_capacity(64),
+        }
+    }
+
+    /// Whether ctrl-l asked for a full repaint (clears the request).
+    pub fn take_redraw_request(&mut self) -> bool {
+        std::mem::take(&mut self.redraw_requested)
+    }
+
+    /// Whether music is playing right now, locally or in the followed app.
+    pub fn is_playing(&self) -> bool {
+        if self.sources.is_remote() {
+            self.sources
+                .state
+                .as_ref()
+                .and_then(|s| s.now.as_ref())
+                .is_some_and(|n| n.playing)
+        } else {
+            self.snapshot
+                .as_ref()
+                .is_some_and(|s| s.status == cw_audio::Status::Playing)
+        }
+    }
+
+    /// Eases `motion_level` toward 1 while playing and 0 while paused, with
+    /// no overshoot (an exponential approach, like a critically damped
+    /// spring), so pausing settles the art instead of freezing it mid-move.
+    fn ease_motion_level(&mut self) {
+        let (target, tau) = if self.is_playing() {
+            (1.0, RESUME_SECS)
+        } else {
+            (0.0, SETTLE_SECS)
+        };
+        let dt = 1.0 / self.fps.max(1) as f32;
+        let k = 1.0 - (-dt / tau).exp();
+        self.motion_level += (target - self.motion_level) * k;
+        if (self.motion_level - target).abs() < 0.002 {
+            self.motion_level = target;
         }
     }
 
@@ -276,6 +337,7 @@ impl App {
     pub fn tick(&mut self) {
         self.snapshot = self.player.as_ref().map(Player::snapshot);
         self.sources.tick();
+        self.tick_remote_library();
         self.audio = if self.sources.is_remote() {
             // A remote player's audio comes from system capture; until (or
             // unless) that runs, a beat clock at the track's tempo stands in.
@@ -299,6 +361,7 @@ impl App {
         }
         self.model_was_ready = ready;
         self.update_cover();
+        self.ease_motion_level();
         self.poll_scan();
         self.track_listening();
     }
@@ -591,6 +654,10 @@ impl App {
             self.should_quit = true;
             return;
         }
+        if ctrl && key.code == KeyCode::Char('l') {
+            self.redraw_requested = true;
+            return;
+        }
         // Text input first: the playlist-name prompt, then search.
         if let Some(text) = self.prompt.as_mut() {
             match key.code {
@@ -608,6 +675,9 @@ impl App {
                 KeyCode::Char(c) => text.push(c),
                 _ => {}
             }
+            return;
+        }
+        if self.browsing_remote() && self.remote_library_key(key.code) {
             return;
         }
         if self.mode == Mode::Library && self.browser.in_search() {
@@ -663,8 +733,18 @@ impl App {
             KeyCode::Char('D') => self.debug_page = self.debug_page.next(),
             KeyCode::Char('R') => self.reload_recipe(),
             KeyCode::Char('?') => self.show_help = !self.show_help,
-            KeyCode::Char('c') => self.art_style = self.art_style.next(),
-            KeyCode::Char('m') => self.motion = !self.motion,
+            KeyCode::Char('c') => {
+                self.art_style = self.art_style.next();
+                self.say(format!("art style: {}", self.art_style.name()));
+            }
+            KeyCode::Char('m') => {
+                self.motion = !self.motion;
+                self.say(if self.motion {
+                    "motion on"
+                } else {
+                    "motion off"
+                });
+            }
             _ => self.on_playback_key(key.code, shift),
         }
     }
@@ -784,6 +864,108 @@ impl App {
             _ => return,
         };
         self.sources.send(cmd);
+    }
+
+    /// Whether Library mode shows the Spotify library.
+    pub fn browsing_remote(&self) -> bool {
+        self.mode == Mode::Library && self.sources.active == SourceKind::Spotify
+    }
+
+    /// Files finished Spotify listings and asks for the current place when
+    /// it is needed (Library mode, logged in).
+    fn tick_remote_library(&mut self) {
+        if self.sources.active != SourceKind::Spotify {
+            return;
+        }
+        let state = self.sources.state.as_ref();
+        self.remote_browser
+            .absorb(state.and_then(|s| s.library.as_ref()));
+        let ready = state.is_some_and(|s| s.auth == cw_sources::Auth::Ready);
+        if self.mode == Mode::Library
+            && ready
+            && let Some(path) = self.remote_browser.wanted()
+        {
+            self.sources.send(Remote::Browse(path));
+        }
+    }
+
+    /// Keys in the Spotify library view. Returns whether the key was used;
+    /// playback keys fall through to the remote controls.
+    fn remote_library_key(&mut self, code: KeyCode) -> bool {
+        let b = &mut self.remote_browser;
+        if b.filter.is_some() {
+            match code {
+                KeyCode::Esc => {
+                    b.back();
+                }
+                KeyCode::Backspace => b.delete_char(),
+                KeyCode::Up => b.move_by(-1),
+                KeyCode::Down => b.move_by(1),
+                KeyCode::Enter => {
+                    let a = b.enter();
+                    self.remote_action(a);
+                }
+                KeyCode::Char(c) => b.type_char(c),
+                _ => return false,
+            }
+            return true;
+        }
+        let action = match code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                b.move_by(-1);
+                RemoteAction::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                b.move_by(1);
+                RemoteAction::None
+            }
+            KeyCode::PageUp => {
+                b.move_by(-10);
+                RemoteAction::None
+            }
+            KeyCode::PageDown => {
+                b.move_by(10);
+                RemoteAction::None
+            }
+            KeyCode::Home => {
+                b.move_by(isize::MIN / 2);
+                RemoteAction::None
+            }
+            KeyCode::End => {
+                b.move_by(isize::MAX / 2);
+                RemoteAction::None
+            }
+            KeyCode::Char('/') => {
+                b.start_filter();
+                RemoteAction::None
+            }
+            KeyCode::Char('r') => {
+                b.refresh();
+                self.say("refreshing from Spotify");
+                RemoteAction::None
+            }
+            KeyCode::Enter => b.enter(),
+            KeyCode::Backspace | KeyCode::Esc => {
+                if !b.back() {
+                    return false;
+                }
+                RemoteAction::None
+            }
+            _ => return false,
+        };
+        self.remote_action(action);
+        true
+    }
+
+    fn remote_action(&mut self, action: RemoteAction) {
+        match action {
+            RemoteAction::None => {}
+            RemoteAction::Browse(path) => self.sources.send(Remote::Browse(path)),
+            RemoteAction::Play(req) => {
+                self.sources.send(Remote::Play(req));
+                self.say("starting playback in Spotify");
+            }
+        }
     }
 
     pub fn on_frame_drawn(&mut self, at: Instant) {

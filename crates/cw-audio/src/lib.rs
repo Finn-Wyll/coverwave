@@ -21,7 +21,7 @@ mod player;
 #[cfg(feature = "playback")]
 mod reader;
 
-pub use analysis::{Analyser, AnalyserHandle, TempoEstimate, estimate_tempo};
+pub use analysis::{Analyser, AnalyserHandle, RANGE_DB, TempoEstimate, estimate_tempo};
 #[cfg(feature = "playback")]
 pub use info::{AUDIO_EXTENSIONS, Track, TrackInfo, collect_audio_files, cover_art, is_audio_file};
 #[cfg(feature = "playback")]
@@ -51,10 +51,24 @@ pub fn analyse_file(
     out_rate: u32,
     every_frames: usize,
 ) -> Result<Vec<cw_core::AudioFrame>, AudioError> {
+    let mut out = analyse_file_with(path, out_rate, every_frames, vec![Analyser::new(out_rate)])?;
+    Ok(out.pop().unwrap_or_default())
+}
+
+#[cfg(feature = "playback")]
+/// Like [`analyse_file`], but decodes once and feeds every analyser in
+/// `analysers` (e.g. with different tuning), returning one frame series per
+/// analyser in the same order.
+pub fn analyse_file_with(
+    path: &std::path::Path,
+    out_rate: u32,
+    every_frames: usize,
+    mut analysers: Vec<Analyser>,
+) -> Result<Vec<Vec<cw_core::AudioFrame>>, AudioError> {
     let mut reader = reader::TrackReader::open(path, out_rate)?;
-    let mut analyser = Analyser::new(out_rate);
     let every = every_frames.max(1);
-    let (mut buf, mut mono, mut out) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut buf, mut mono) = (Vec::new(), Vec::new());
+    let mut out = vec![Vec::new(); analysers.len()];
     let mut since = 0;
     loop {
         let more = reader.read_into(&mut buf)?;
@@ -67,13 +81,19 @@ pub fn analyse_file(
         for chunk in mono.chunks(every) {
             // Report on the same cadence regardless of decode chunk sizes.
             let take = (every - since).min(chunk.len());
-            analyser.push(&chunk[..take]);
+            for a in &mut analysers {
+                a.push(&chunk[..take]);
+            }
             since += take;
             if since == every {
-                out.push(analyser.frame());
+                for (a, o) in analysers.iter().zip(&mut out) {
+                    o.push(a.frame());
+                }
                 since = 0;
             }
-            analyser.push(&chunk[take..]);
+            for a in &mut analysers {
+                a.push(&chunk[take..]);
+            }
             since += chunk.len() - take;
         }
         if !more {

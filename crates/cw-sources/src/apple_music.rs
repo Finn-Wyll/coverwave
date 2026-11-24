@@ -162,7 +162,12 @@ impl Backend for AppleMusic {
                 "tell application \"Music\" to set sound volume to {}",
                 v.min(&100)
             ),
-            Command::Login | Command::Logout => return Ok(()),
+            Command::Login | Command::Logout | Command::Browse(_) => return Ok(()),
+            Command::Play(_) => {
+                return Err(SourceError::Unavailable(
+                    "pick music in the Music app itself".into(),
+                ));
+            }
         };
         osascript(&script, &[]).map(|_| ())
     }

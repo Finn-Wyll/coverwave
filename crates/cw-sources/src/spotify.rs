@@ -11,8 +11,12 @@
 //! Without it the player still shows now-playing and the cover.
 
 use crate::util::{agent, base64url, encode, form, open_browser, query_param};
-use crate::{ArtRef, Auth, Backend, Command, NowPlaying, SourceError};
+use crate::{
+    ArtRef, Auth, Backend, Command, ItemAction, LibraryItem, LibraryPath, NowPlaying, PlayRequest,
+    SourceError,
+};
 use serde::Deserialize;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -20,8 +24,18 @@ use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
-pub const SCOPES: &str =
-    "user-read-playback-state user-modify-playback-state user-read-currently-playing";
+/// Playback plus read-only library access. Logins made before the library
+/// scopes were added get a "log in again" message on library calls.
+pub const SCOPES: &str = "user-read-playback-state user-modify-playback-state \
+user-read-currently-playing playlist-read-private playlist-read-collaborative user-library-read";
+/// Page size the library endpoints allow.
+const PAGE: usize = 50;
+/// At most this many rows per listing (keeps a huge library responsive).
+const MAX_ROWS: usize = 1000;
+/// At most this many tracks in one "play these" request.
+const MAX_URIS: usize = 100;
+/// How long to wait for a Spotify app we launched to appear as a device.
+const DEVICE_WAIT: Duration = Duration::from_secs(10);
 pub const DEFAULT_PORT: u16 = 8898;
 /// How long the login listener waits for the browser.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
@@ -291,6 +305,8 @@ pub struct Spotify {
     last_playing: bool,
     /// Artist ID -> genres (or none), so each artist is looked up once.
     genres: std::collections::HashMap<String, Option<String>>,
+    /// The logged-in user's id, once looked up.
+    user: Option<String>,
 }
 
 impl Spotify {
@@ -305,6 +321,7 @@ impl Spotify {
             backoff_until: None,
             last_playing: false,
             genres: std::collections::HashMap::new(),
+            user: None,
         }
     }
 
@@ -421,6 +438,16 @@ impl Spotify {
     /// One Web API call; retries once after refreshing on 401. Returns the
     /// status and body.
     fn api(&mut self, method: &str, path: &str) -> Result<(u16, String), SourceError> {
+        self.api_body(method, path, None)
+    }
+
+    /// Like [`Spotify::api`], with an optional JSON body for PUT/POST.
+    fn api_body(
+        &mut self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+    ) -> Result<(u16, String), SourceError> {
         if let Some(until) = self.backoff_until
             && Instant::now() < until
         {
@@ -431,10 +458,21 @@ impl Spotify {
             let url = format!("{}{path}", self.cfg.api_base);
             let auth = format!("Bearer {token}");
             let a = agent();
-            let result = match method {
-                "GET" => a.get(&url).header("Authorization", &auth).call(),
-                "PUT" => a.put(&url).header("Authorization", &auth).send_empty(),
-                _ => a.post(&url).header("Authorization", &auth).send_empty(),
+            let json = "application/json";
+            let result = match (method, body) {
+                ("GET", _) => a.get(&url).header("Authorization", &auth).call(),
+                ("PUT", None) => a.put(&url).header("Authorization", &auth).send_empty(),
+                ("PUT", Some(b)) => a
+                    .put(&url)
+                    .header("Authorization", &auth)
+                    .header("Content-Type", json)
+                    .send(b),
+                (_, None) => a.post(&url).header("Authorization", &auth).send_empty(),
+                (_, Some(b)) => a
+                    .post(&url)
+                    .header("Authorization", &auth)
+                    .header("Content-Type", json)
+                    .send(b),
             };
             let mut resp = result.map_err(|e| SourceError::Http(e.to_string()))?;
             let status = resp.status().as_u16();
@@ -460,14 +498,269 @@ impl Spotify {
     fn control(&mut self, method: &str, path: &str) -> Result<(), SourceError> {
         match self.api(method, path)?.0 {
             200..=299 => Ok(()),
-            403 => Err(SourceError::Failed(
-                "Spotify Premium is needed for playback control".into(),
+            403 => Err(premium_needed()),
+            404 => {
+                // Nothing is active: wake a device and try once more.
+                let id = self.pick_device()?;
+                self.transfer(&id, false)?;
+                std::thread::sleep(Duration::from_millis(300));
+                match self.api(method, path)?.0 {
+                    200..=299 => Ok(()),
+                    403 => Err(premium_needed()),
+                    s => Err(SourceError::Http(format!("Spotify: HTTP {s}"))),
+                }
+            }
+            s => Err(SourceError::Http(format!("Spotify: HTTP {s}"))),
+        }
+    }
+
+    /// Play/pause. With nothing active, resumes on a picked device.
+    fn play_pause(&mut self) -> Result<(), SourceError> {
+        let path = if self.last_playing {
+            "/me/player/pause"
+        } else {
+            "/me/player/play"
+        };
+        match self.api("PUT", path)?.0 {
+            200..=299 => Ok(()),
+            403 => Err(premium_needed()),
+            404 => {
+                let id = self.pick_device()?;
+                self.transfer(&id, true)
+            }
+            s => Err(SourceError::Http(format!("Spotify: HTTP {s}"))),
+        }
+    }
+
+    /// `PUT /me/player`: move playback to `device_id`.
+    fn transfer(&mut self, device_id: &str, play: bool) -> Result<(), SourceError> {
+        let body = json!({ "device_ids": [device_id], "play": play }).to_string();
+        match self.api_body("PUT", "/me/player", Some(&body))?.0 {
+            200..=299 => Ok(()),
+            403 => Err(premium_needed()),
+            s => Err(SourceError::Http(format!(
+                "Spotify: HTTP {s} moving playback"
+            ))),
+        }
+    }
+
+    /// The device to use when none is active: the active one if any, else
+    /// this computer, else any device. With no devices at all, opens the
+    /// Spotify app (macOS) and waits for it to appear.
+    fn pick_device(&mut self) -> Result<String, SourceError> {
+        if let Some(id) = self.choose_device()? {
+            return Ok(id);
+        }
+        if launch_spotify_app() {
+            let deadline = Instant::now() + DEVICE_WAIT;
+            while Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(800));
+                if let Some(id) = self.choose_device()? {
+                    return Ok(id);
+                }
+            }
+        }
+        Err(SourceError::Failed(
+            "no Spotify device: open Spotify on this computer or your phone".into(),
+        ))
+    }
+
+    fn choose_device(&mut self) -> Result<Option<String>, SourceError> {
+        let v = self.get_json("/me/player/devices")?;
+        Ok(choose_device(&v))
+    }
+
+    /// `PUT /me/player/play` with `req`, picking a device if none is active.
+    fn play(&mut self, req: &PlayRequest) -> Result<(), SourceError> {
+        let body = play_body(req).to_string();
+        match self.api_body("PUT", "/me/player/play", Some(&body))?.0 {
+            200..=299 => Ok(()),
+            403 => Err(premium_needed()),
+            404 => {
+                let id = self.pick_device()?;
+                let path = format!("/me/player/play?device_id={}", encode(&id));
+                match self.api_body("PUT", &path, Some(&body))?.0 {
+                    200..=299 => Ok(()),
+                    403 => Err(premium_needed()),
+                    s => Err(SourceError::Http(format!("Spotify: HTTP {s}"))),
+                }
+            }
+            s => Err(SourceError::Http(format!("Spotify: HTTP {s}"))),
+        }
+    }
+
+    /// A GET that must return JSON. Explains the common refusals.
+    fn get_json(&mut self, path: &str) -> Result<Value, SourceError> {
+        let (status, body) = self.api("GET", path)?;
+        match status {
+            200 => serde_json::from_str(&body)
+                .map_err(|e| SourceError::Http(format!("Spotify sent bad JSON: {e}"))),
+            401 | 403 if body.to_ascii_lowercase().contains("scope") => Err(SourceError::Failed(
+                "press L to log in again: coverwave now asks to read your library".into(),
             )),
-            404 => Err(SourceError::Failed(
-                "no active Spotify device: start playing in Spotify first".into(),
+            403 => Err(SourceError::Failed(
+                "Spotify only lets apps list playlists you own or collaborate on; \
+                 press enter on it in the playlist list to play it"
+                    .into(),
             )),
             s => Err(SourceError::Http(format!("Spotify: HTTP {s}"))),
         }
+    }
+
+    /// Every `items` entry of a paginated listing, up to [`MAX_ROWS`].
+    fn get_all(&mut self, path: &str) -> Result<Vec<Value>, SourceError> {
+        let sep = if path.contains('?') { '&' } else { '?' };
+        let mut out = Vec::new();
+        loop {
+            let page = self.get_json(&format!("{path}{sep}limit={PAGE}&offset={}", out.len()))?;
+            let items = page["items"].as_array().cloned().unwrap_or_default();
+            let got = items.len();
+            out.extend(items);
+            let total = page["total"].as_u64().unwrap_or(0) as usize;
+            if got == 0 || out.len() >= total || out.len() >= MAX_ROWS {
+                return Ok(out);
+            }
+        }
+    }
+
+    /// The logged-in user's id (cached), to tell owned playlists apart.
+    fn user_id(&mut self) -> Result<String, SourceError> {
+        if let Some(id) = &self.user {
+            return Ok(id.clone());
+        }
+        let me = self.get_json("/me")?;
+        let id = me["id"].as_str().unwrap_or_default().to_string();
+        self.user = Some(id.clone());
+        Ok(id)
+    }
+}
+
+fn premium_needed() -> SourceError {
+    SourceError::Failed("Spotify Premium is needed for playback control".into())
+}
+
+/// Opens the Spotify app in the background so it registers as a device.
+/// Returns whether that was attempted.
+fn launch_spotify_app() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Stdio;
+        std::process::Command::new("open")
+            .args(["-g", "-a", "Spotify"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// From `GET /me/player/devices`: the active device, else a computer, else
+/// any device that accepts commands.
+pub fn choose_device(v: &Value) -> Option<String> {
+    let devices: Vec<&Value> = v["devices"]
+        .as_array()?
+        .iter()
+        .filter(|d| !d["is_restricted"].as_bool().unwrap_or(false))
+        .filter(|d| d["id"].is_string())
+        .collect();
+    let id = |d: &&Value| d["id"].as_str().map(str::to_string);
+    devices
+        .iter()
+        .find(|d| d["is_active"].as_bool().unwrap_or(false))
+        .or_else(|| {
+            devices.iter().find(|d| {
+                d["type"]
+                    .as_str()
+                    .is_some_and(|t| t.eq_ignore_ascii_case("computer"))
+            })
+        })
+        .or_else(|| devices.first())
+        .and_then(id)
+}
+
+/// The JSON body of `PUT /me/player/play`.
+pub fn play_body(req: &PlayRequest) -> Value {
+    let mut b = serde_json::Map::new();
+    if let Some(c) = &req.context_uri {
+        b.insert("context_uri".into(), json!(c));
+        if let Some(o) = &req.offset_uri {
+            b.insert("offset".into(), json!({ "uri": o }));
+        }
+    } else if !req.uris.is_empty() {
+        let uris: Vec<&String> = req.uris.iter().take(MAX_URIS).collect();
+        b.insert("uris".into(), json!(uris));
+    }
+    Value::Object(b)
+}
+
+fn artists(v: &Value) -> Option<String> {
+    let names: Vec<&str> = v["artists"]
+        .as_array()?
+        .iter()
+        .filter_map(|a| a["name"].as_str())
+        .collect();
+    (!names.is_empty()).then(|| names.join(", "))
+}
+
+/// A playable track (or episode) row; `None` for local files and gaps.
+fn track_row(t: &Value) -> Option<(String, LibraryItem)> {
+    if t["is_local"].as_bool().unwrap_or(false) {
+        return None;
+    }
+    let uri = t["uri"].as_str()?.to_string();
+    let item = LibraryItem {
+        title: t["name"].as_str().unwrap_or("Untitled").to_string(),
+        subtitle: artists(t).or_else(|| t["show"]["name"].as_str().map(str::to_string)),
+        count: None,
+        duration_secs: t["duration_ms"].as_u64().map(|ms| (ms / 1000) as u32),
+        action: ItemAction::Play(PlayRequest::default()),
+    };
+    Some((uri, item))
+}
+
+/// Playlist entries carry the track under `item` (since February 2026) or
+/// `track` (before); either may also be a placeholder.
+fn playlist_entry_track(e: &Value) -> &Value {
+    if e["item"].is_object() {
+        &e["item"]
+    } else {
+        &e["track"]
+    }
+}
+
+/// Tracks of a context (album or playlist): each row starts the context at
+/// that track, so the rest of it plays on.
+fn context_rows(tracks: Vec<(String, LibraryItem)>, context: &str) -> Vec<LibraryItem> {
+    let mut rows = vec![play_all_row(
+        tracks.len(),
+        PlayRequest {
+            context_uri: Some(context.to_string()),
+            ..Default::default()
+        },
+    )];
+    rows.extend(tracks.into_iter().map(|(uri, mut item)| {
+        item.action = ItemAction::Play(PlayRequest {
+            context_uri: Some(context.to_string()),
+            offset_uri: Some(uri),
+            uris: Vec::new(),
+        });
+        item
+    }));
+    rows
+}
+
+fn play_all_row(n: usize, req: PlayRequest) -> LibraryItem {
+    LibraryItem {
+        title: "Play all".into(),
+        subtitle: None,
+        count: Some(n as u32),
+        duration_secs: None,
+        action: ItemAction::Play(req),
     }
 }
 
@@ -534,6 +827,128 @@ impl Backend for Spotify {
         }
     }
 
+    fn browse(&mut self, path: &LibraryPath) -> Result<Vec<LibraryItem>, SourceError> {
+        self.finish_login()?;
+        let open = |title: &str, sub: &str, to: LibraryPath| LibraryItem {
+            title: title.into(),
+            subtitle: Some(sub.into()),
+            count: None,
+            duration_secs: None,
+            action: ItemAction::Open(to),
+        };
+        match path {
+            LibraryPath::Root => Ok(vec![
+                open(
+                    "Liked Songs",
+                    "songs you have saved",
+                    LibraryPath::LikedSongs,
+                ),
+                open(
+                    "Playlists",
+                    "yours and ones you follow",
+                    LibraryPath::Playlists,
+                ),
+                open("Albums", "albums you have saved", LibraryPath::Albums),
+            ]),
+            LibraryPath::LikedSongs => {
+                let tracks: Vec<(String, LibraryItem)> = self
+                    .get_all("/me/tracks")?
+                    .iter()
+                    .filter_map(|e| track_row(&e["track"]))
+                    .collect();
+                // No context URI exists for liked songs: each row plays the
+                // list from that track on.
+                let uris: Vec<String> = tracks.iter().map(|(u, _)| u.clone()).collect();
+                let mut rows = vec![play_all_row(
+                    uris.len(),
+                    PlayRequest {
+                        uris: uris.clone(),
+                        ..Default::default()
+                    },
+                )];
+                rows.extend(tracks.into_iter().enumerate().map(|(i, (_, mut item))| {
+                    item.action = ItemAction::Play(PlayRequest {
+                        uris: uris[i..].to_vec(),
+                        ..Default::default()
+                    });
+                    item
+                }));
+                Ok(rows)
+            }
+            LibraryPath::Playlists => {
+                let me = self.user_id()?;
+                Ok(self
+                    .get_all("/me/playlists")?
+                    .iter()
+                    .filter_map(|p| {
+                        let id = p["id"].as_str()?.to_string();
+                        let uri = p["uri"].as_str()?.to_string();
+                        let name = p["name"].as_str().unwrap_or("Untitled").to_string();
+                        let owner = p["owner"]["id"].as_str().unwrap_or_default();
+                        let owner_name = p["owner"]["display_name"].as_str().unwrap_or(owner);
+                        // Spotify only lists the tracks of playlists you own
+                        // or collaborate on; others can still be played.
+                        let readable = owner == me || p["collaborative"].as_bool().unwrap_or(false);
+                        let total = p["items"]["total"]
+                            .as_u64()
+                            .or_else(|| p["tracks"]["total"].as_u64());
+                        Some(LibraryItem {
+                            title: name.clone(),
+                            subtitle: Some(if owner == me {
+                                "yours".to_string()
+                            } else {
+                                format!("by {owner_name}")
+                            }),
+                            count: total.map(|t| t as u32),
+                            duration_secs: None,
+                            action: if readable {
+                                ItemAction::Open(LibraryPath::Playlist { id, name, uri })
+                            } else {
+                                ItemAction::Play(PlayRequest {
+                                    context_uri: Some(uri),
+                                    ..Default::default()
+                                })
+                            },
+                        })
+                    })
+                    .collect())
+            }
+            LibraryPath::Playlist { id, uri, .. } => {
+                let tracks = self
+                    .get_all(&format!("/playlists/{}/items", encode(id)))?
+                    .iter()
+                    .filter_map(|e| track_row(playlist_entry_track(e)))
+                    .collect();
+                Ok(context_rows(tracks, uri))
+            }
+            LibraryPath::Albums => Ok(self
+                .get_all("/me/albums")?
+                .iter()
+                .filter_map(|e| {
+                    let a = &e["album"];
+                    let id = a["id"].as_str()?.to_string();
+                    let uri = a["uri"].as_str()?.to_string();
+                    let name = a["name"].as_str().unwrap_or("Untitled").to_string();
+                    Some(LibraryItem {
+                        title: name.clone(),
+                        subtitle: artists(a),
+                        count: a["total_tracks"].as_u64().map(|t| t as u32),
+                        duration_secs: None,
+                        action: ItemAction::Open(LibraryPath::Album { id, name, uri }),
+                    })
+                })
+                .collect()),
+            LibraryPath::Album { id, uri, .. } => {
+                let tracks = self
+                    .get_all(&format!("/albums/{}/tracks", encode(id)))?
+                    .iter()
+                    .filter_map(track_row)
+                    .collect();
+                Ok(context_rows(tracks, uri))
+            }
+        }
+    }
+
     fn poll(&mut self) -> Result<Option<NowPlaying>, SourceError> {
         self.finish_login()?;
         if self.login.is_some() {
@@ -572,10 +987,13 @@ impl Backend for Spotify {
                 self.store.clear();
                 self.refresh = None;
                 self.access = None;
+                self.user = None;
                 Ok(())
             }
-            Command::PlayPause if self.last_playing => self.control("PUT", "/me/player/pause"),
-            Command::PlayPause => self.control("PUT", "/me/player/play"),
+            Command::PlayPause => self.play_pause(),
+            Command::Play(req) => self.play(req),
+            // Handled by the source thread through `browse`.
+            Command::Browse(_) => Ok(()),
             Command::Next => self.control("POST", "/me/player/next"),
             Command::Previous => self.control("POST", "/me/player/previous"),
             Command::Seek(secs) => self.control(
@@ -786,5 +1204,236 @@ mod tests {
         s.write_all(b"GET /callback?code=C&state=evil HTTP/1.1\r\n\r\n")
             .unwrap();
         assert_eq!(t.join().unwrap(), Err("state mismatch".to_string()));
+    }
+
+    /// Request lines and bodies seen by `mock_recording`.
+    type RequestLog = Arc<Mutex<Vec<(String, String)>>>;
+
+    /// Like `mock`, but also records each request line and body.
+    fn mock_recording(responses: Vec<(&'static str, u16, String)>) -> (String, RequestLog) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let l = log.clone();
+        std::thread::spawn(move || {
+            for (expect, status, body) in responses {
+                let Ok((mut s, _)) = listener.accept() else {
+                    return;
+                };
+                let mut reader = BufReader::new(s.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let mut len = 0usize;
+                loop {
+                    let mut h = String::new();
+                    reader.read_line(&mut h).unwrap();
+                    if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                    if h == "\r\n" || h.is_empty() {
+                        break;
+                    }
+                }
+                let mut buf = vec![0u8; len];
+                std::io::Read::read_exact(&mut reader, &mut buf).unwrap();
+                l.lock().unwrap().push((
+                    line.trim().to_string(),
+                    String::from_utf8_lossy(&buf).into(),
+                ));
+                assert!(line.contains(expect), "expected {expect}, got {line}");
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (base, log)
+    }
+
+    fn token() -> (&'static str, u16, String) {
+        (
+            "POST /api/token",
+            200,
+            r#"{"access_token":"A","expires_in":3600}"#.into(),
+        )
+    }
+
+    #[test]
+    fn picks_the_active_device_then_a_computer() {
+        let v: Value = serde_json::from_str(
+            r#"{"devices":[
+                {"id":"phone","is_active":false,"is_restricted":false,"type":"Smartphone"},
+                {"id":"mac","is_active":false,"is_restricted":false,"type":"Computer"},
+                {"id":"tv","is_active":false,"is_restricted":true,"type":"TV"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(choose_device(&v).as_deref(), Some("mac"));
+        let active: Value = serde_json::from_str(
+            r#"{"devices":[{"id":"mac","is_active":false,"type":"Computer"},
+                {"id":"phone","is_active":true,"type":"Smartphone"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(choose_device(&active).as_deref(), Some("phone"));
+        let none: Value = serde_json::from_str(r#"{"devices":[]}"#).unwrap();
+        assert_eq!(choose_device(&none), None);
+    }
+
+    #[test]
+    fn play_bodies_use_context_offset_or_uris() {
+        let ctx = play_body(&PlayRequest {
+            context_uri: Some("spotify:album:A".into()),
+            offset_uri: Some("spotify:track:T".into()),
+            uris: Vec::new(),
+        });
+        assert_eq!(
+            ctx,
+            json!({"context_uri": "spotify:album:A", "offset": {"uri": "spotify:track:T"}})
+        );
+        let many: Vec<String> = (0..150).map(|i| format!("spotify:track:{i}")).collect();
+        let list = play_body(&PlayRequest {
+            uris: many,
+            ..Default::default()
+        });
+        assert_eq!(list["uris"].as_array().unwrap().len(), MAX_URIS);
+        assert_eq!(list["uris"][0], "spotify:track:0");
+    }
+
+    #[test]
+    fn browses_playlists_and_opens_only_readable_ones() {
+        let (base, log) = mock_recording(vec![
+            token(),
+            ("GET /v1/me ", 200, r#"{"id":"me"}"#.into()),
+            (
+                "GET /v1/me/playlists?limit=50&offset=0",
+                200,
+                r#"{"total":2,"items":[
+                  {"id":"p1","uri":"spotify:playlist:p1","name":"Mine","owner":{"id":"me"},
+                   "items":{"total":12}},
+                  {"id":"p2","uri":"spotify:playlist:p2","name":"Theirs",
+                   "owner":{"id":"dj","display_name":"DJ"},"tracks":{"total":30}}]}"#
+                    .into(),
+            ),
+        ]);
+        let mut sp = spotify(&base, Some("R"));
+        let rows = sp.browse(&LibraryPath::Playlists).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].count, Some(12));
+        assert!(
+            matches!(&rows[0].action, ItemAction::Open(LibraryPath::Playlist { id, .. }) if id == "p1")
+        );
+        assert_eq!(rows[1].subtitle.as_deref(), Some("by DJ"));
+        assert_eq!(rows[1].count, Some(30), "old `tracks.total` still read");
+        assert_eq!(
+            rows[1].action,
+            ItemAction::Play(PlayRequest {
+                context_uri: Some("spotify:playlist:p2".into()),
+                ..Default::default()
+            })
+        );
+        assert_eq!(log.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn playlist_tracks_read_item_or_track_and_skip_local_files() {
+        let (base, _) = mock_recording(vec![
+            token(),
+            (
+                "GET /v1/playlists/p1/items?limit=50&offset=0",
+                200,
+                r#"{"total":3,"items":[
+                  {"item":{"uri":"spotify:track:a","name":"New shape","duration_ms":61000,
+                           "artists":[{"name":"X"},{"name":"Y"}]}},
+                  {"track":{"uri":"spotify:track:b","name":"Old shape","artists":[]}},
+                  {"item":{"uri":"spotify:local:z","name":"Local","is_local":true}}]}"#
+                    .into(),
+            ),
+        ]);
+        let mut sp = spotify(&base, Some("R"));
+        let rows = sp
+            .browse(&LibraryPath::Playlist {
+                id: "p1".into(),
+                name: "Mine".into(),
+                uri: "spotify:playlist:p1".into(),
+            })
+            .unwrap();
+        let titles: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(titles, ["Play all", "New shape", "Old shape"]);
+        assert_eq!(rows[1].subtitle.as_deref(), Some("X, Y"));
+        assert_eq!(rows[1].duration_secs, Some(61));
+        assert_eq!(
+            rows[2].action,
+            ItemAction::Play(PlayRequest {
+                context_uri: Some("spotify:playlist:p1".into()),
+                offset_uri: Some("spotify:track:b".into()),
+                uris: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn liked_songs_play_on_from_the_chosen_track() {
+        let (base, _) = mock_recording(vec![
+            token(),
+            (
+                "GET /v1/me/tracks?limit=50&offset=0",
+                200,
+                r#"{"total":2,"items":[{"track":{"uri":"spotify:track:1","name":"One"}},
+                                       {"track":{"uri":"spotify:track:2","name":"Two"}}]}"#
+                    .into(),
+            ),
+        ]);
+        let mut sp = spotify(&base, Some("R"));
+        let rows = sp.browse(&LibraryPath::LikedSongs).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows[2].action,
+            ItemAction::Play(PlayRequest {
+                uris: vec!["spotify:track:2".into()],
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn play_with_no_active_device_targets_a_listed_one() {
+        let (base, log) = mock_recording(vec![
+            token(),
+            ("PUT /v1/me/player/play ", 404, "{}".into()),
+            (
+                "GET /v1/me/player/devices",
+                200,
+                r#"{"devices":[{"id":"mac 1","is_active":false,"type":"Computer"}]}"#.into(),
+            ),
+            (
+                "PUT /v1/me/player/play?device_id=mac%201",
+                204,
+                String::new(),
+            ),
+        ]);
+        let mut sp = spotify(&base, Some("R"));
+        let req = PlayRequest {
+            context_uri: Some("spotify:album:A".into()),
+            ..Default::default()
+        };
+        sp.command(&Command::Play(req)).unwrap();
+        let log = log.lock().unwrap();
+        assert_eq!(log.len(), 4);
+        assert_eq!(log[3].1, r#"{"context_uri":"spotify:album:A"}"#);
+    }
+
+    #[test]
+    fn missing_library_scope_asks_to_log_in_again() {
+        let (base, _) = mock_recording(vec![
+            token(),
+            (
+                "GET /v1/me/tracks",
+                403,
+                r#"{"error":{"status":403,"message":"Insufficient client scope"}}"#.into(),
+            ),
+        ]);
+        let mut sp = spotify(&base, Some("R"));
+        let err = sp.browse(&LibraryPath::LikedSongs).unwrap_err().to_string();
+        assert!(err.contains("log in again"), "{err}");
     }
 }

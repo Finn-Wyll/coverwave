@@ -129,8 +129,10 @@ impl Pca {
             return Err(PcaError("truncated".into()));
         }
         let f: Vec<f32> = b[20..]
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
         Ok(Pca {
             dim,

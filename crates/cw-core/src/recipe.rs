@@ -13,7 +13,9 @@ use std::collections::BTreeMap;
 
 /// Bump when the recipe's meaning changes; cached recipes with another
 /// version are rebuilt.
-pub const RECIPE_VERSION: u32 = 2;
+/// 2: aurora, starfield, digital rain and lightning layers (2026-11-24).
+/// 3: genre-aware selection, 13 more layers (merged with 2).
+pub const RECIPE_VERSION: u32 = 3;
 
 /// Number of style-DNA components.
 pub const DNA_DIMS: usize = 8;
@@ -236,12 +238,6 @@ pub enum Layer {
         events: u32,
         max_shift: u32,
     },
-    /// Electronic: columns of falling glyphs.
-    CodeRain {
-        intensity: f32,
-        density: f32,
-        fall_cycles: u32,
-    },
     /// Electronic: a VHS-style ghost of the art in a moving band.
     ChromaShift {
         intensity: f32,
@@ -261,14 +257,6 @@ pub enum Layer {
         density: f32,
         rise_cycles: u32,
     },
-    /// Nature: occasional lightning strikes.
-    Lightning { intensity: f32, strikes: u32 },
-    /// Nature: aurora curtains across the top.
-    Aurora {
-        intensity: f32,
-        bands: u32,
-        cycles: u32,
-    },
     /// Nature: wisps of smoke drifting up.
     Smoke {
         intensity: f32,
@@ -279,12 +267,6 @@ pub enum Layer {
     SunRays {
         intensity: f32,
         rays: u32,
-        cycles: u32,
-    },
-    /// Space: stars streaming outward from the centre.
-    Starfield {
-        intensity: f32,
-        density: f32,
         cycles: u32,
     },
     /// Space: stars twinkling in dark areas.
@@ -308,6 +290,33 @@ pub enum Layer {
     },
     /// Fallback when no scene is strong enough: slow palette breathing.
     Ambient { intensity: f32, cycles: u32 },
+    /// sky, snow: shimmering curtains across the upper background.
+    Aurora {
+        intensity: f32,
+        /// Curtains, 1..=3.
+        bands: u32,
+        cycles: u32,
+    },
+    /// very dark scene, sky: stars streaming outward from the subject.
+    /// Streaks lengthen with loudness.
+    Starfield {
+        intensity: f32,
+        count: u32,
+        cycles: u32,
+    },
+    /// city at night: cascading columns of the cover's own glyphs.
+    DigitalRain {
+        intensity: f32,
+        density: f32,
+        fall_cycles: u32,
+    },
+    /// very dark scene, ocean: a bolt toward the subject on some strong
+    /// beats (which ones is decided by the seed and the beat count).
+    Lightning {
+        intensity: f32,
+        /// Share of strong beats that strike, 0..1.
+        chance: f32,
+    },
 }
 
 /// Every layer kind, as written in JSON.
@@ -330,7 +339,7 @@ pub const LAYER_KINDS: &[&str] = &[
     "eq_bars",
     "scanlines",
     "row_glitch",
-    "code_rain",
+    "digital_rain",
     "chroma_shift",
     "falling_leaves",
     "bubbles",
@@ -366,19 +375,19 @@ impl Layer {
             | Layer::EqBars { intensity, .. }
             | Layer::Scanlines { intensity, .. }
             | Layer::RowGlitch { intensity, .. }
-            | Layer::CodeRain { intensity, .. }
             | Layer::ChromaShift { intensity, .. }
             | Layer::FallingLeaves { intensity, .. }
             | Layer::Bubbles { intensity, .. }
-            | Layer::Lightning { intensity, .. }
-            | Layer::Aurora { intensity, .. }
             | Layer::Smoke { intensity, .. }
             | Layer::SunRays { intensity, .. }
-            | Layer::Starfield { intensity, .. }
             | Layer::Twinkle { intensity, .. }
             | Layer::Orbit { intensity, .. }
             | Layer::LightSweep { intensity, .. }
-            | Layer::Ambient { intensity, .. } => *intensity,
+            | Layer::Ambient { intensity, .. }
+            | Layer::Aurora { intensity, .. }
+            | Layer::Starfield { intensity, .. }
+            | Layer::DigitalRain { intensity, .. }
+            | Layer::Lightning { intensity, .. } => *intensity,
         }
     }
 
@@ -403,19 +412,19 @@ impl Layer {
             Layer::EqBars { .. } => "eq_bars",
             Layer::Scanlines { .. } => "scanlines",
             Layer::RowGlitch { .. } => "row_glitch",
-            Layer::CodeRain { .. } => "code_rain",
             Layer::ChromaShift { .. } => "chroma_shift",
             Layer::FallingLeaves { .. } => "falling_leaves",
             Layer::Bubbles { .. } => "bubbles",
-            Layer::Lightning { .. } => "lightning",
-            Layer::Aurora { .. } => "aurora",
             Layer::Smoke { .. } => "smoke",
             Layer::SunRays { .. } => "sun_rays",
-            Layer::Starfield { .. } => "starfield",
             Layer::Twinkle { .. } => "twinkle",
             Layer::Orbit { .. } => "orbit",
             Layer::LightSweep { .. } => "light_sweep",
             Layer::Ambient { .. } => "ambient",
+            Layer::Aurora { .. } => "aurora",
+            Layer::Starfield { .. } => "starfield",
+            Layer::DigitalRain { .. } => "digital_rain",
+            Layer::Lightning { .. } => "lightning",
         }
     }
 }

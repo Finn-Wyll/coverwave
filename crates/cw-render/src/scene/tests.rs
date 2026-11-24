@@ -20,6 +20,24 @@ fn loud() -> AudioFrame {
     }
 }
 
+/// Loud with no beat in progress: the steady budget applies.
+fn loud_no_beat() -> AudioFrame {
+    AudioFrame {
+        onset: 0.0,
+        ..loud()
+    }
+}
+
+/// A beat with no bass (so no thump) and moderate level (so no glitch).
+fn with_onset(onset: f32) -> AudioFrame {
+    AudioFrame {
+        bands: [0.0; 6],
+        level: 0.3,
+        onset,
+        onset_count: 1,
+    }
+}
+
 /// A warm disc (the subject) on a cool gradient sky.
 fn cover() -> (RgbImage, Palette) {
     let n = 96u32;
@@ -217,11 +235,6 @@ fn every_kind() -> Vec<Layer> {
             events: 4,
             max_shift: 3,
         },
-        Layer::CodeRain {
-            intensity: 0.8,
-            density: 0.4,
-            fall_cycles: 2,
-        },
         Layer::ChromaShift {
             intensity: 0.8,
             cycles: 1,
@@ -238,10 +251,6 @@ fn every_kind() -> Vec<Layer> {
             density: 0.3,
             rise_cycles: 1,
         },
-        Layer::Lightning {
-            intensity: 0.8,
-            strikes: 2,
-        },
         Layer::Aurora {
             intensity: 0.8,
             bands: 2,
@@ -255,11 +264,6 @@ fn every_kind() -> Vec<Layer> {
         Layer::SunRays {
             intensity: 0.8,
             rays: 5,
-            cycles: 1,
-        },
-        Layer::Starfield {
-            intensity: 0.8,
-            density: 0.3,
             cycles: 1,
         },
         Layer::Twinkle {
@@ -278,7 +282,26 @@ fn every_kind() -> Vec<Layer> {
             cycles: 1,
             width: 0.12,
         },
+        Layer::Starfield {
+            intensity: 0.8,
+            count: 60,
+            cycles: 1,
+        },
+        Layer::DigitalRain {
+            intensity: 0.8,
+            density: 0.5,
+            fall_cycles: 2,
+        },
+        Layer::Lightning {
+            intensity: 0.8,
+            chance: 1.0,
+        },
     ]
+}
+
+/// Layers that only draw on a beat, so they are still in silence.
+fn event_only(kind: &str) -> bool {
+    kind == "lightning"
 }
 
 fn frame(s: &Scene, n: u32, audio: &AudioFrame) -> Output {
@@ -352,6 +375,10 @@ fn every_kind_moves_and_loops_seamlessly() {
         let steps: Vec<usize> = (0..l)
             .map(|n| frame(&s, n, &a).grid.diff_count(&frame(&s, n + 1, &a).grid))
             .collect();
+        if event_only(kind) {
+            assert!(steps.iter().all(|&c| c == 0), "{kind} moved in silence");
+            continue;
+        }
         assert!(steps.iter().any(|&c| c > 0), "{kind} never moves");
         let seam = steps[l as usize - 1];
         let worst = *steps[..l as usize - 1].iter().max().unwrap();
@@ -477,9 +504,10 @@ fn limiter_caps_audio_jumps_and_drops_weakest_first() {
         3,
     );
     let s = scene_for(&r, W, H);
-    // Silence then a full-scale hit: fog thickens and snow appears at once.
+    // Silence then a full-scale swell (no beat): fog thickens and snow
+    // appears at once.
     let prev = frame(&s, 10, &quiet());
-    let raw = frame(&s, 11, &loud());
+    let raw = frame(&s, 11, &loud_no_beat());
     let raw_changes = raw.grid.diff_count(&prev.grid);
     let limited = limit_changes(&s, &prev, raw.clone());
     let kept = limited.grid.diff_count(&prev.grid);
@@ -507,8 +535,8 @@ fn limiter_caps_audio_jumps_and_drops_weakest_first() {
         "kept {weakest_kept} > dropped {strongest_dropped}"
     );
     // Under budget, the limiter changes nothing.
-    let a = frame(&s, 20, &loud());
-    let b = frame(&s, 21, &loud());
+    let a = frame(&s, 20, &loud_no_beat());
+    let b = frame(&s, 21, &loud_no_beat());
     assert!(b.grid.diff_count(&a.grid) <= s.max_changes());
     assert_eq!(limit_changes(&s, &a, b.clone()), b);
 }
@@ -518,8 +546,78 @@ fn high_energy_covers_get_a_bigger_budget() {
     let calm = scene_for(&recipe(vec![], 0.2, 1), W, H);
     let wild = scene_for(&recipe(vec![], 1.0, 1), W, H);
     let cells = W as usize * H as usize;
-    assert_eq!(calm.max_changes(), (0.15 * cells as f32) as usize);
-    assert_eq!(wild.max_changes(), (0.30 * cells as f32) as usize);
+    assert_eq!(calm.max_changes(), (BUDGET * cells as f32) as usize);
+    assert_eq!(wild.max_changes(), (BUDGET_HIGH * cells as f32) as usize);
+}
+
+#[test]
+fn beats_widen_the_budget_and_decay_back() {
+    let s = scene_for(&recipe(vec![], 0.2, 1), W, H);
+    let cells = (W as usize * H as usize) as f32;
+    assert_eq!(s.max_changes_on_beat(0.0), s.max_changes());
+    assert_eq!(
+        s.max_changes_on_beat(1.0),
+        ((BUDGET + BEAT_BURST).min(BUDGET_MAX) * cells) as usize
+    );
+    let wild = scene_for(&recipe(vec![], 1.0, 1), W, H);
+    assert_eq!(wild.max_changes_on_beat(1.0), (BUDGET_MAX * cells) as usize);
+    // The limiter uses the beat budget of the frame it is limiting.
+    let r = recipe(
+        vec![Layer::Fog {
+            intensity: 0.9,
+            density: 0.9,
+            drift_deg: 0.0,
+            cycles: 1,
+        }],
+        0.2,
+        3,
+    );
+    let s = scene_for(&r, W, H);
+    let prev = frame(&s, 10, &quiet());
+    let hit = frame(&s, 11, &loud());
+    assert_eq!(hit.burst, 1.0);
+    let kept = limit_changes(&s, &prev, hit.clone())
+        .grid
+        .diff_count(&prev.grid);
+    assert!(kept <= s.max_changes_on_beat(1.0));
+    assert!(
+        kept > s.max_changes(),
+        "a beat should get past the steady budget"
+    );
+}
+
+#[test]
+fn beat_ring_starts_at_the_subject_and_expands() {
+    // No layers: inside the cover only the beat ring and thump can change
+    // anything, and this audio has no bass, so no thump. Compare against
+    // the same audio without the beat, inside the cover only (the margin
+    // glow also swells on beats).
+    let s = scene_for(&recipe(vec![], 0.3, 4), W, H);
+    let base = frame(&s, 0, &with_onset(0.0)).grid;
+    // Mean distance of brightened cells from the subject centre grows as the
+    // onset decays from the hit.
+    let spread = |onset: f32| {
+        let g = frame(&s, 0, &with_onset(onset)).grid;
+        let (mut sum, mut n) = (0.0, 0);
+        for y in 0..H {
+            for x in 0..W {
+                if inside_art(&s, x, y) && g.get(x, y) != base.get(x, y) {
+                    assert!(!s.is_protected(x, y), "ring touched the subject");
+                    sum += ring_dist(s.origin, x as f32 + 0.5, y as f32 + 0.5);
+                    n += 1;
+                }
+            }
+        }
+        assert!(n > 0, "onset {onset} drew nothing");
+        sum / n as f32
+    };
+    let (early, mid, late) = (spread(0.9), spread(0.6), spread(0.3));
+    assert!(early < mid && mid < late, "{early} {mid} {late}");
+    // Pure: same input, same ring.
+    assert_eq!(
+        frame(&s, 5, &with_onset(0.6)),
+        frame(&s, 5, &with_onset(0.6))
+    );
 }
 
 #[test]
@@ -561,4 +659,164 @@ fn golden_frames() {
         out.push_str(&chars(&frame(&s, 37, &mid).grid));
     }
     insta::assert_snapshot!(out);
+}
+
+/// Cells (x, y) where two grids differ.
+fn diff_cells(a: &CellGrid, b: &CellGrid) -> Vec<(u16, u16)> {
+    let mut out = Vec::new();
+    for y in 0..a.height() {
+        for x in 0..a.width() {
+            if a.get(x, y) != b.get(x, y) {
+                out.push((x, y));
+            }
+        }
+    }
+    out
+}
+
+fn inside_art(s: &Scene, x: u16, y: u16) -> bool {
+    let a = s.art;
+    x >= a.x && x < a.x + a.w && y >= a.y && y < a.y + a.h
+}
+
+#[test]
+fn fixture_has_margins_for_the_stage_effects() {
+    let s = scene_for(&recipe(vec![], 0.5, 1), W, H);
+    assert!(s.art.x >= 12, "art at {:?}", s.art);
+}
+
+#[test]
+fn glow_lives_in_the_margins_and_grows_with_level() {
+    let s = scene_for(&recipe(vec![], 0.5, 1), W, H);
+    let base = frame(&s, 0, &quiet()).grid;
+    let lit = |level: f32| {
+        let a = AudioFrame {
+            level,
+            ..AudioFrame::default()
+        };
+        let g = frame(&s, 0, &a).grid;
+        let cells = diff_cells(&base, &g);
+        for &(x, y) in &cells {
+            assert!(
+                !inside_art(&s, x, y),
+                "glow drew inside the art at ({x},{y})"
+            );
+        }
+        cells.len()
+    };
+    let (soft, loud) = (lit(0.2), lit(1.0));
+    assert!(soft > 0, "some glow even when quiet");
+    assert!(loud > soft * 2, "louder glows further: {soft} -> {loud}");
+}
+
+#[test]
+fn equaliser_follows_the_bands_and_is_silent_in_silence() {
+    let s = scene_for(&recipe(vec![], 0.5, 1), W, H);
+    let base = frame(&s, 0, &quiet()).grid;
+    let bars = |bands: [f32; 6]| {
+        let a = AudioFrame {
+            bands,
+            ..AudioFrame::default()
+        };
+        let g = frame(&s, 0, &a).grid;
+        // Equaliser glyphs sit on the bottom row of the margins.
+        (0..W)
+            .filter(|&x| !inside_art(&s, x, H - 1))
+            .filter(|&x| matches!(g.get(x, H - 1).unwrap().ch, '#' | '=' | '-' | '.'))
+            .filter(|&x| g.get(x, H - 1) != base.get(x, H - 1))
+            .count()
+    };
+    assert_eq!(bars([0.0; 6]), 0);
+    assert_eq!(
+        bars([1.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        2,
+        "one band, both sides"
+    );
+    assert_eq!(bars([1.0; 6]), 12);
+}
+
+#[test]
+fn thump_pushes_the_background_on_kicks_only() {
+    let s = scene_for(&recipe(vec![], 0.8, 1), W, H);
+    let base = frame(&s, 0, &quiet()).grid;
+    let bass_no_beat = AudioFrame {
+        bands: [1.0; 6],
+        ..AudioFrame::default()
+    };
+    let in_art = |g: &CellGrid| {
+        diff_cells(&base, g)
+            .into_iter()
+            .filter(|&(x, y)| inside_art(&s, x, y))
+            .count()
+    };
+    assert_eq!(in_art(&frame(&s, 0, &bass_no_beat).grid), 0);
+    let kick = AudioFrame {
+        bands: [1.0; 6],
+        onset: 1.0,
+        onset_count: 1,
+        ..AudioFrame::default()
+    };
+    assert!(in_art(&frame(&s, 0, &kick).grid) > 50);
+}
+
+#[test]
+fn glitch_hits_some_strong_beats_and_is_deterministic() {
+    let s = scene_for(&recipe(vec![], 1.0, 9), W, H);
+    let hit = |count: u64| AudioFrame {
+        bands: [0.0; 6],
+        level: 0.9,
+        onset: 1.0,
+        onset_count: count,
+    };
+    // Below the level gate nothing glitches; compare the cover only, since
+    // the margin glow depends on level too.
+    let in_art = |g: &CellGrid| -> Vec<Cell> {
+        (0..H)
+            .flat_map(|y| (0..W).map(move |x| (x, y)))
+            .filter(|&(x, y)| inside_art(&s, x, y))
+            .map(|(x, y)| *g.get(x, y).unwrap())
+            .collect()
+    };
+    let calm_audio = AudioFrame {
+        level: 0.44,
+        ..hit(0)
+    };
+    let calm = in_art(&frame(&s, 0, &calm_audio).grid);
+    let glitched: Vec<u64> = (0..40)
+        .filter(|&c| in_art(&frame(&s, 0, &hit(c)).grid) != calm)
+        .collect();
+    assert!(!glitched.is_empty() && glitched.len() < 40, "{glitched:?}");
+    assert_eq!(frame(&s, 0, &hit(7)), frame(&s, 0, &hit(7)));
+}
+
+#[test]
+fn lightning_strikes_some_beats_from_the_top() {
+    let r = recipe(
+        vec![Layer::Lightning {
+            intensity: 0.9,
+            chance: 0.5,
+        }],
+        0.0, // no glitch
+        21,
+    );
+    let s = scene_for(&r, W, H);
+    let without = scene_for(&recipe(vec![], 0.0, 21), W, H);
+    let beat = |count: u64| AudioFrame {
+        onset: 0.9,
+        onset_count: count,
+        ..AudioFrame::default()
+    };
+    let mut struck = 0;
+    for c in 0..30 {
+        let with = frame(&s, 0, &beat(c)).grid;
+        let bolt = diff_cells(&frame(&without, 0, &beat(c)).grid, &with);
+        if bolt.is_empty() {
+            continue;
+        }
+        struck += 1;
+        let top = bolt.iter().map(|&(_, y)| y).min().unwrap();
+        assert_eq!(top, s.art.y, "bolts start at the top of the cover");
+        assert!(bolt.iter().all(|&(x, y)| !s.is_protected(x, y)));
+    }
+    assert!((5..25).contains(&struck), "{struck} of 30 beats struck");
 }

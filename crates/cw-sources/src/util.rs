@@ -112,22 +112,30 @@ pub fn base64url(data: &[u8]) -> String {
 /// Opens `url` in the default browser. Returns false if that failed (the
 /// caller then shows the URL).
 pub fn open_browser(url: &str) -> bool {
+    use std::process::Stdio;
+    // The helper must not print into the UI's terminal.
+    let quiet = |mut c: std::process::Command| {
+        c.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        c
+    };
     // The usual convention: $BROWSER, when set, opens URLs.
     if let Some(b) = std::env::var_os("BROWSER").filter(|b| !b.is_empty()) {
-        return std::process::Command::new(b)
-            .arg(url)
-            .status()
-            .is_ok_and(|s| s.success());
+        let mut c = quiet(std::process::Command::new(b));
+        return c.arg(url).status().is_ok_and(|s| s.success());
     }
     #[cfg(target_os = "macos")]
-    let r = std::process::Command::new("open").arg(url).status();
+    let r = quiet(std::process::Command::new("open")).arg(url).status();
     // Not `cmd /C start`: cmd would split the URL at its `&`s.
     #[cfg(windows)]
-    let r = std::process::Command::new("rundll32")
+    let r = quiet(std::process::Command::new("rundll32"))
         .args(["url.dll,FileProtocolHandler", url])
         .status();
     #[cfg(all(not(target_os = "macos"), not(windows)))]
-    let r = std::process::Command::new("xdg-open").arg(url).status();
+    let r = quiet(std::process::Command::new("xdg-open"))
+        .arg(url)
+        .status();
     r.is_ok_and(|s| s.success())
 }
 

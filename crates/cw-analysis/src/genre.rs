@@ -192,7 +192,7 @@ impl GenreFamily {
                 ("scanlines", 0.9),
                 ("pulse_rings", 0.7),
                 ("row_glitch", 0.7),
-                ("code_rain", 0.6),
+                ("digital_rain", 0.6),
                 ("chroma_shift", 0.6),
                 ("eq_bars", 0.6),
                 ("neon_flicker", 0.5),
