@@ -172,6 +172,12 @@ Spotify server.
       written yet (only needed if you are on an older macOS).
 
 ### Spotify in the TUI
+- [ ] Library: with Spotify active, `tab` shows Liked Songs, Playlists and
+      Albums. Log in again with `L` once (new permissions). `enter` opens or
+      plays, `/` filters, `backspace` goes back, `r` refreshes. Followed
+      playlists you do not own play whole (Spotify will not list them).
+- [ ] With the Spotify app closed, play something from the library:
+      coverwave should open Spotify in the background and start it there.
 - [ ] `S` → Spotify → "press L to log in" → `L` opens the browser → approve →
       the HUD shows what is playing, with the cover and its motion.
 - [ ] Quit and restart: still logged in (refresh token in the Keychain; look

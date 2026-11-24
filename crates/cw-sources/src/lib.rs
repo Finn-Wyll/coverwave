@@ -41,6 +41,83 @@ pub struct NowPlaying {
     pub art: ArtRef,
 }
 
+/// A place in a remote library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LibraryPath {
+    /// The top level: liked songs, playlists, albums.
+    Root,
+    LikedSongs,
+    Playlists,
+    Albums,
+    /// One playlist's tracks (`id`, display name, context URI).
+    Playlist {
+        id: String,
+        name: String,
+        uri: String,
+    },
+    /// One album's tracks.
+    Album {
+        id: String,
+        name: String,
+        uri: String,
+    },
+}
+
+impl LibraryPath {
+    /// A short name for headings and breadcrumbs.
+    pub fn title(&self) -> &str {
+        match self {
+            LibraryPath::Root => "Library",
+            LibraryPath::LikedSongs => "Liked Songs",
+            LibraryPath::Playlists => "Playlists",
+            LibraryPath::Albums => "Albums",
+            LibraryPath::Playlist { name, .. } | LibraryPath::Album { name, .. } => name,
+        }
+    }
+}
+
+/// One row of a remote library listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryItem {
+    pub title: String,
+    /// Artist, owner or other context.
+    pub subtitle: Option<String>,
+    /// Track count for collections, duration in seconds for tracks.
+    pub count: Option<u32>,
+    pub duration_secs: Option<u32>,
+    /// What `enter` does with it.
+    pub action: ItemAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ItemAction {
+    /// Open a nested listing.
+    Open(LibraryPath),
+    /// Start playback.
+    Play(PlayRequest),
+}
+
+/// What to start playing, Spotify-style: a context (album or playlist URI),
+/// optionally starting at one of its tracks, or an explicit list of tracks.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PlayRequest {
+    pub context_uri: Option<String>,
+    /// Start at this track within the context.
+    pub offset_uri: Option<String>,
+    /// Play these tracks in order (used when there is no context, such as
+    /// liked songs).
+    pub uris: Vec<String>,
+}
+
+/// The latest library listing the UI asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryView {
+    pub path: LibraryPath,
+    pub items: Vec<LibraryItem>,
+    pub loading: bool,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     PlayPause,
@@ -52,6 +129,10 @@ pub enum Command {
     /// Spotify: start the browser login.
     Login,
     Logout,
+    /// Load a library listing into [`RemoteState::library`].
+    Browse(LibraryPath),
+    /// Start playing something from the library.
+    Play(PlayRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +166,8 @@ pub struct RemoteState {
     pub auth: Auth,
     /// The last error (cleared by the next successful poll).
     pub error: Option<String>,
+    /// The last library listing requested with [`Command::Browse`].
+    pub library: Option<LibraryView>,
 }
 
 impl RemoteState {
@@ -112,6 +195,13 @@ pub trait Backend: Send + 'static {
     fn poll_interval(&self) -> Duration {
         Duration::from_secs(1)
     }
+    /// Lists part of the user's library. Sources without one say so.
+    fn browse(&mut self, _path: &LibraryPath) -> Result<Vec<LibraryItem>, SourceError> {
+        Err(SourceError::Unavailable(format!(
+            "{} has no library to browse here",
+            self.name()
+        )))
+    }
 }
 
 /// The UI's handle on a source thread. Dropping it stops the thread.
@@ -129,6 +219,7 @@ impl RemoteHandle {
             read_at: Instant::now(),
             auth: backend.auth(),
             error: None,
+            library: None,
         }));
         let (tx, rx): (Sender<Command>, Receiver<Command>) = channel();
         let shared = state.clone();
@@ -155,6 +246,32 @@ impl RemoteHandle {
                     let r = backend.poll();
                     publish(backend.as_ref(), r);
                     match rx.recv_timeout(backend.poll_interval()) {
+                        Ok(Command::Browse(path)) => {
+                            let view = |items, loading, error| LibraryView {
+                                path: path.clone(),
+                                items,
+                                loading,
+                                error,
+                            };
+                            {
+                                let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+                                // Keep showing the old rows only if they are
+                                // for the same place (a refresh).
+                                let keep = s
+                                    .library
+                                    .as_ref()
+                                    .filter(|l| l.path == path)
+                                    .map(|l| l.items.clone())
+                                    .unwrap_or_default();
+                                s.library = Some(view(keep, true, None));
+                            }
+                            let result = backend.browse(&path);
+                            let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+                            s.library = Some(match result {
+                                Ok(items) => view(items, false, None),
+                                Err(e) => view(Vec::new(), false, Some(e.to_string())),
+                            });
+                        }
                         Ok(cmd) => {
                             if let Err(e) = backend.command(&cmd) {
                                 let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());

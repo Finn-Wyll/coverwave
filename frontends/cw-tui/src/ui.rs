@@ -353,7 +353,146 @@ fn track_label(t: &Track) -> String {
     }
 }
 
+/// The Spotify library: a breadcrumb, the current listing (filterable),
+/// and what Spotify is playing.
+fn draw_remote_library(f: &mut Frame, app: &mut App, area: Rect) {
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).areas(area);
+    let accent = accent(app);
+    let crumbs = app.remote_browser.breadcrumb().join(" / ");
+    let title = match &app.remote_browser.filter {
+        Some(q) => format!("Spotify / {crumbs}   / {q}_"),
+        None => format!("Spotify / {crumbs}"),
+    };
+    let block = panel(&title);
+    let inner = block.inner(left);
+    f.render_widget(block, left);
+
+    let state = app.sources.state.clone();
+    let auth = state.as_ref().map(|s| s.auth.clone());
+    let message = match auth {
+        Some(cw_sources::Auth::NeedsLogin) => Some(("Press L to log in to Spotify.", FG)),
+        Some(cw_sources::Auth::LoggingIn) => Some(("Finish logging in in your browser.", FG)),
+        None => Some(("Connecting to Spotify.", DIM)),
+        Some(cw_sources::Auth::Ready) => None,
+    };
+    let rows_h = inner.height as usize;
+    let width = inner.width as usize;
+    if let Some((msg, color)) = message {
+        f.render_widget(
+            Paragraph::new(Span::styled(msg, Style::new().fg(color))),
+            inner,
+        );
+    } else if let Some(err) = app.remote_browser.error.clone() {
+        let p = Paragraph::new(vec![
+            Line::from(Span::styled(err, Style::new().fg(ERROR))),
+            Line::from(""),
+            Line::from(dim("r tries again, backspace goes back")),
+        ])
+        .wrap(Wrap { trim: false });
+        f.render_widget(p, inner);
+    } else if app.remote_browser.rows().is_empty() {
+        let msg = if app.remote_browser.is_loading() {
+            "loading from Spotify"
+        } else if app.remote_browser.filter.is_some() {
+            "nothing matches"
+        } else {
+            "nothing here"
+        };
+        f.render_widget(Paragraph::new(dim(msg)), inner);
+    } else {
+        let offset = app.remote_browser.scroll(rows_h);
+        let cursor = app.remote_browser.cursor();
+        let side_w = 8usize;
+        let lines: Vec<Line> = app
+            .remote_browser
+            .rows()
+            .into_iter()
+            .enumerate()
+            .skip(offset)
+            .take(rows_h)
+            .map(|(i, item)| {
+                let selected = i == cursor;
+                let side = match (item.duration_secs, item.count) {
+                    (Some(d), _) => fmt_time(d as f64),
+                    (None, Some(n)) => format!("{n}"),
+                    _ => String::new(),
+                };
+                let opens = matches!(item.action, cw_sources::ItemAction::Open(_));
+                let marker = if opens { "> " } else { "  " };
+                let main_w = width.saturating_sub(side_w + 2);
+                let title = fit(&item.title, main_w);
+                let rest = main_w.saturating_sub(title.chars().count());
+                let sub = item
+                    .subtitle
+                    .as_deref()
+                    .filter(|_| rest > 6)
+                    .map(|s| fit(&format!("  {s}"), rest))
+                    .unwrap_or_default();
+                let pad = main_w.saturating_sub(title.chars().count() + sub.chars().count());
+                let bg = if selected { SELECTED_BG } else { BG };
+                let title_style = if item.title == "Play all" {
+                    Style::new().fg(accent)
+                } else if selected {
+                    Style::new().fg(FG).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new().fg(FG)
+                };
+                Line::from(vec![
+                    Span::styled(marker, Style::new().fg(accent).bg(bg)),
+                    Span::styled(title, title_style.bg(bg)),
+                    Span::styled(sub, Style::new().fg(DIM).bg(bg)),
+                    Span::styled(" ".repeat(pad), Style::new().bg(bg)),
+                    Span::styled(format!("{side:>side_w$}"), Style::new().fg(DIM).bg(bg)),
+                ])
+            })
+            .collect();
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+
+    // Right: what Spotify is playing, and the keys for this view.
+    let block = panel("Now playing");
+    let inner = block.inner(right);
+    f.render_widget(block, right);
+    let now = state.as_ref().and_then(|s| s.now.clone());
+    let w = inner.width as usize;
+    let mut lines = match &now {
+        Some(n) => vec![
+            Line::from(Span::styled(
+                fit(&n.title, w),
+                Style::new().fg(FG).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(dim(fit(n.artist.as_deref().unwrap_or(""), w))),
+            Line::from(dim(fit(n.album.as_deref().unwrap_or(""), w))),
+        ],
+        None => vec![Line::from(dim("nothing playing yet"))],
+    };
+    if let Some(e) = state.as_ref().and_then(|s| s.error.clone()) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(fit(&e, w), Style::new().fg(ERROR))));
+    }
+    lines.push(Line::from(""));
+    for (k, what) in [
+        ("enter", "open / play"),
+        ("bksp", "back"),
+        ("/", "filter"),
+        ("r", "refresh"),
+        ("space", "play / pause"),
+        ("n  p", "next / previous"),
+    ] {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{k:>6}  "), Style::new().fg(FG)),
+            dim(what),
+        ]));
+    }
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+}
+
 fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
+    if app.browsing_remote() {
+        draw_remote_library(f, app, area);
+        return;
+    }
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).areas(area);
 

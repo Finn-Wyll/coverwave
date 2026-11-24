@@ -260,6 +260,9 @@ trait SystemCapture { fn start(&mut self, sink: Producer<f32>) -> Result<()>; fn
 
 - **Local:** scan configured folders (`walkdir`), read tags and embedded art with `lofty`, and fall back to `cover.jpg`/`folder.png` in the same folder. Watch for changes with `notify`.
 - **Spotify:** Web API with OAuth PKCE (client ID in the config, no secret). It provides now-playing, play/pause/next/prev/seek/volume and cover URLs. Playback control needs a **Premium** account. Tokens are stored in the OS keychain (`keyring`).
+  - **Library (added 2026-11-24):** with Spotify active, Library mode browses Liked Songs, Playlists and Albums (`/me/tracks`, `/me/playlists`, `/me/albums`, `/playlists/{id}/items`, `/albums/{id}/tracks`; up to 1000 rows per listing, cached 5 minutes) and plays through `PUT /me/player/play` with a context URI, an offset URI, or a list of up to 100 track URIs. Uses the February 2026 Development Mode API: playlist entries carry `item` (old `track` is still read), and only playlists the user owns or collaborates on can be listed, so followed playlists play whole instead of opening.
+  - **Device pickup:** when Spotify answers 404 (no active device), coverwave lists devices, prefers the active one, then a computer, then any; on macOS it opens the Spotify app in the background if there are none and waits up to 10s. Playback moves there and the command is retried once.
+  - Scopes: playback ones plus `playlist-read-private playlist-read-collaborative user-library-read`. Older logins get a "press L to log in again" message on library calls.
 - **Apple Music (macOS):** controls Music.app via `osascript`/AppleScript (state, track, artwork export, transport). The MusicKit web API for catalogue/library access is optional and later, since it needs an Apple Developer token.
 - A shared `Source` trait means the UI never cares which source is active.
 

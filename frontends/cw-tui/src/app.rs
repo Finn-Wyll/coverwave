@@ -1,5 +1,6 @@
 use crate::browse::{Action, Browser};
 use crate::cover::{CoverEntry, CoverLoader, RecipeContext, Slot};
+use crate::remote_browse::{RemoteAction, RemoteBrowser};
 use crate::sources::{SourceKind, Sources};
 use cw_audio::{Player, Snapshot};
 use cw_core::{ArtStyle, AudioFrame, CellGrid, Repeat};
@@ -227,6 +228,8 @@ pub struct App {
     redraw_requested: bool,
     /// Where stderr is logged while the UI runs (debug overlay).
     pub stderr_log: Option<PathBuf>,
+    /// The Spotify library view (Library mode while Spotify is active).
+    pub remote_browser: RemoteBrowser,
     frame_times: VecDeque<Instant>,
 }
 
@@ -287,6 +290,7 @@ impl App {
             dissolve: None,
             redraw_requested: false,
             stderr_log: None,
+            remote_browser: RemoteBrowser::new(),
             frame_times: VecDeque::with_capacity(64),
         }
     }
@@ -332,6 +336,7 @@ impl App {
     pub fn tick(&mut self) {
         self.snapshot = self.player.as_ref().map(Player::snapshot);
         self.sources.tick();
+        self.tick_remote_library();
         self.audio = if self.sources.is_remote() {
             // A remote player's audio comes from system capture (silence,
             // and gentle default motion, until capture is running).
@@ -636,6 +641,9 @@ impl App {
             }
             return;
         }
+        if self.browsing_remote() && self.remote_library_key(key.code) {
+            return;
+        }
         if self.mode == Mode::Library && self.browser.in_search() {
             let lib = self.library.as_ref();
             match key.code {
@@ -820,6 +828,108 @@ impl App {
             _ => return,
         };
         self.sources.send(cmd);
+    }
+
+    /// Whether Library mode shows the Spotify library.
+    pub fn browsing_remote(&self) -> bool {
+        self.mode == Mode::Library && self.sources.active == SourceKind::Spotify
+    }
+
+    /// Files finished Spotify listings and asks for the current place when
+    /// it is needed (Library mode, logged in).
+    fn tick_remote_library(&mut self) {
+        if self.sources.active != SourceKind::Spotify {
+            return;
+        }
+        let state = self.sources.state.as_ref();
+        self.remote_browser
+            .absorb(state.and_then(|s| s.library.as_ref()));
+        let ready = state.is_some_and(|s| s.auth == cw_sources::Auth::Ready);
+        if self.mode == Mode::Library
+            && ready
+            && let Some(path) = self.remote_browser.wanted()
+        {
+            self.sources.send(Remote::Browse(path));
+        }
+    }
+
+    /// Keys in the Spotify library view. Returns whether the key was used;
+    /// playback keys fall through to the remote controls.
+    fn remote_library_key(&mut self, code: KeyCode) -> bool {
+        let b = &mut self.remote_browser;
+        if b.filter.is_some() {
+            match code {
+                KeyCode::Esc => {
+                    b.back();
+                }
+                KeyCode::Backspace => b.delete_char(),
+                KeyCode::Up => b.move_by(-1),
+                KeyCode::Down => b.move_by(1),
+                KeyCode::Enter => {
+                    let a = b.enter();
+                    self.remote_action(a);
+                }
+                KeyCode::Char(c) => b.type_char(c),
+                _ => return false,
+            }
+            return true;
+        }
+        let action = match code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                b.move_by(-1);
+                RemoteAction::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                b.move_by(1);
+                RemoteAction::None
+            }
+            KeyCode::PageUp => {
+                b.move_by(-10);
+                RemoteAction::None
+            }
+            KeyCode::PageDown => {
+                b.move_by(10);
+                RemoteAction::None
+            }
+            KeyCode::Home => {
+                b.move_by(isize::MIN / 2);
+                RemoteAction::None
+            }
+            KeyCode::End => {
+                b.move_by(isize::MAX / 2);
+                RemoteAction::None
+            }
+            KeyCode::Char('/') => {
+                b.start_filter();
+                RemoteAction::None
+            }
+            KeyCode::Char('r') => {
+                b.refresh();
+                self.say("refreshing from Spotify");
+                RemoteAction::None
+            }
+            KeyCode::Enter => b.enter(),
+            KeyCode::Backspace | KeyCode::Esc => {
+                if !b.back() {
+                    return false;
+                }
+                RemoteAction::None
+            }
+            _ => return false,
+        };
+        self.remote_action(action);
+        true
+    }
+
+    fn remote_action(&mut self, action: RemoteAction) {
+        match action {
+            RemoteAction::None => {}
+            RemoteAction::Browse(path) => self.sources.send(Remote::Browse(path)),
+            RemoteAction::Play(req) => {
+                self.sources.send(Remote::Play(req));
+                self.say("starting playback in Spotify");
+            }
+        }
     }
 
     pub fn on_frame_drawn(&mut self, at: Instant) {

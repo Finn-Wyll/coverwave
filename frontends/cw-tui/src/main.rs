@@ -9,6 +9,7 @@ mod cover;
 mod models;
 mod paths;
 mod recipes;
+mod remote_browse;
 mod sources;
 mod term;
 mod ui;
