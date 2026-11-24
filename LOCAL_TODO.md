@@ -11,13 +11,17 @@ note anything that feels wrong; it can all be tuned.
       clippy is clean, and `cw-tui` embeds its Info.plist with both
       permission strings (checked 2026-11-24).
 
-- [ ] `cargo run -p cw-tui --release` once. It writes
+- [x] `cargo run -p cw-tui --release` once. It writes
       `~/.config/coverwave/config.toml` with comments.
-- [ ] Set `music_dirs` in that file to your music folders (default `~/Music`),
+- [x] Set `music_dirs` in that file to your music folders (default `~/Music`),
       then restart. The library title shows "scanning" and then the track
-      count.
-- [ ] The first run downloads the cover-analysis model (45MB, from
-      huggingface.co). Press `D` twice to see its progress. If your network
+      count. (2026-11-24: the default `~/Music` was right. The scan found 128
+      tracks in 52 artists and 94 albums, all with durations; 4 untagged
+      files went to "Unknown artist". 10 songs appear twice because the
+      Music library has "Song 1.mp3" copies.)
+- [x] The first run downloads the cover-analysis model (45MB, from
+      huggingface.co). (2026-11-24: downloaded 45.5MB and the SHA-256
+      matches the pinned value.) Press `D` twice to see its progress. If your network
       blocks it, download the file listed in
       `frontends/cw-tui/src/models.rs` yourself and set
       `COVERWAVE_MODEL=/path/to/vision_model.onnx`.
