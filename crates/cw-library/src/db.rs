@@ -26,14 +26,17 @@ CREATE TABLE IF NOT EXISTS tracks (
     disc_no INTEGER,
     duration REAL,
     play_count INTEGER NOT NULL DEFAULT 0,
-    last_played INTEGER
+    last_played INTEGER,
+    genre TEXT
 );
 CREATE INDEX IF NOT EXISTS tracks_group ON tracks (group_artist, group_album);
-PRAGMA user_version = 1;
 ";
 
+/// Schema version, in `PRAGMA user_version`. 2 added `genre`.
+const SCHEMA_VERSION: i64 = 2;
+
 const COLUMNS: &str = "id, path, title, artist, album, album_artist, group_artist, group_album, \
-                       track_no, disc_no, duration, play_count, last_played";
+                       track_no, disc_no, duration, play_count, last_played, genre";
 const ORDER: &str = "group_artist COLLATE NOCASE, group_album COLLATE NOCASE, \
                      IFNULL(disc_no, 1), IFNULL(track_no, 0), path";
 
@@ -54,6 +57,7 @@ pub struct LibTrack {
     pub duration_secs: Option<f64>,
     pub play_count: u32,
     pub last_played: Option<i64>,
+    pub genre: Option<String>,
 }
 
 impl LibTrack {
@@ -68,6 +72,7 @@ impl LibTrack {
                 album_artist: self.album_artist.clone(),
                 track_no: self.track_no,
                 disc_no: self.disc_no,
+                genre: self.genre.clone(),
                 duration_secs: self.duration_secs,
             },
         }
@@ -88,6 +93,7 @@ impl LibTrack {
             duration_secs: r.get(10)?,
             play_count: r.get(11)?,
             last_played: r.get(12)?,
+            genre: r.get(13)?,
         })
     }
 }
@@ -137,6 +143,16 @@ impl Library {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
         conn.execute_batch(SCHEMA)?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 2 {
+            // v1 databases lack `genre`: add it, and mark every row stale so
+            // the next scan re-reads tags (play counts are kept).
+            if conn.prepare("SELECT genre FROM tracks LIMIT 0").is_err() {
+                conn.execute_batch("ALTER TABLE tracks ADD COLUMN genre TEXT")?;
+            }
+            conn.execute("UPDATE tracks SET mtime = 0", [])?;
+        }
+        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
         Ok(Library { conn })
     }
 
@@ -159,11 +175,11 @@ impl Library {
         {
             let mut upsert = tx.prepare(
                 "INSERT INTO tracks (path, mtime, size, title, artist, album, album_artist, \
-                 group_artist, group_album, track_no, disc_no, duration) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
+                 group_artist, group_album, track_no, disc_no, duration, genre) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
                  ON CONFLICT(path) DO UPDATE SET mtime = ?2, size = ?3, title = ?4, artist = ?5, \
                  album = ?6, album_artist = ?7, group_artist = ?8, group_album = ?9, \
-                 track_no = ?10, disc_no = ?11, duration = ?12",
+                 track_no = ?10, disc_no = ?11, duration = ?12, genre = ?13",
             )?;
             for file in &files {
                 let key = file.to_string_lossy().into_owned();
@@ -187,6 +203,7 @@ impl Library {
                     i.track_no,
                     i.disc_no,
                     i.duration_secs,
+                    i.genre,
                 ])?;
                 if previous.is_some() {
                     stats.updated += 1;
@@ -340,6 +357,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn v1_database_migrates_keeping_plays() {
+        let dir = temp_dir("migrate");
+        let path = dir.join("library.db");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE tracks (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE,
+                 mtime INTEGER NOT NULL, size INTEGER NOT NULL, title TEXT NOT NULL, artist TEXT,
+                 album TEXT, album_artist TEXT, group_artist TEXT NOT NULL, group_album TEXT NOT NULL,
+                 track_no INTEGER, disc_no INTEGER, duration REAL,
+                 play_count INTEGER NOT NULL DEFAULT 0, last_played INTEGER);
+                 INSERT INTO tracks (path, mtime, size, title, group_artist, group_album, play_count)
+                 VALUES ('/x.flac', 123, 4, 'X', 'A', 'B', 7);
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+        let lib = Library::open(&path).unwrap();
+        let t = lib.track_by_path(Path::new("/x.flac")).unwrap().unwrap();
+        assert_eq!((t.play_count, t.genre), (7, None));
+        let mtime: i64 = lib
+            .conn
+            .query_row("SELECT mtime FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            mtime, 0,
+            "rows are marked stale so the next scan reads genres"
+        );
+        drop(lib);
+        // Reopening does not reset again.
+        let lib = Library::open(&path).unwrap();
+        lib.conn.execute("UPDATE tracks SET mtime = 5", []).unwrap();
+        drop(lib);
+        let lib = Library::open(&path).unwrap();
+        let mtime: i64 = lib
+            .conn
+            .query_row("SELECT mtime FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mtime, 5);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

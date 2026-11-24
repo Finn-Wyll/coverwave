@@ -9,7 +9,7 @@ use cw_core::{ArtStyle, AudioFrame, Palette, Rgb, RgbImage};
 use cw_render::{ArtParams, Input, RAMP, art_rect, base_art, limit_changes, prepare, render};
 use std::hint::black_box;
 
-fn scene() -> cw_render::Scene {
+fn scene_with(layers: Vec<Layer>) -> cw_render::Scene {
     let n = 256u32;
     let pixels = (0..n * n)
         .map(|i| Rgb((i % n) as u8, (i / n) as u8, ((i * 7) % 255) as u8))
@@ -40,6 +40,7 @@ fn scene() -> cw_render::Scene {
             model: "bench".into(),
             prompts_version: 1,
             pca: "none".into(),
+            genre: String::new(),
         },
         scene_weights: Default::default(),
         style_dna: [0.0; 8],
@@ -62,37 +63,63 @@ fn scene() -> cw_render::Scene {
             sway: 1.0,
             charset: Charset::Standard,
         },
-        layers: vec![
-            Layer::Fog {
-                intensity: 0.9,
-                density: 0.8,
-                drift_deg: 0.0,
-                cycles: 1,
-            },
-            Layer::HeatCycle {
-                intensity: 0.8,
-                noise_scale: 0.15,
-                cycles: 1,
-            },
-            Layer::Ripple {
-                intensity: 0.7,
-                amplitude: 2.0,
-                wavelength: 9.0,
-                cycles: 2,
-                direction_deg: 0.0,
-            },
-            Layer::FallingParticles {
-                intensity: 0.6,
-                density: 0.6,
-                fall_cycles: 2,
-                drift_deg: 100.0,
-                glyphs: ".*+".into(),
-            },
-        ],
+        layers,
         audio_mapping: AudioMapping::default(),
         subject_mask: Mask::from_bits(64, 64, &bits),
     };
     prepare(&recipe, base, art, RAMP)
+}
+
+fn scene() -> cw_render::Scene {
+    scene_with(vec![
+        Layer::Fog {
+            intensity: 0.9,
+            density: 0.8,
+            drift_deg: 0.0,
+            cycles: 1,
+        },
+        Layer::HeatCycle {
+            intensity: 0.8,
+            noise_scale: 0.15,
+            cycles: 1,
+        },
+        Layer::Ripple {
+            intensity: 0.7,
+            amplitude: 2.0,
+            wavelength: 9.0,
+            cycles: 2,
+            direction_deg: 0.0,
+        },
+        Layer::FallingParticles {
+            intensity: 0.6,
+            density: 0.6,
+            fall_cycles: 2,
+            drift_deg: 100.0,
+            glyphs: ".*+".into(),
+        },
+    ])
+}
+
+/// The heaviest second-generation kinds (per-cell geometry over the grid).
+fn scene_new() -> cw_render::Scene {
+    scene_with(vec![
+        Layer::PulseRings {
+            intensity: 0.9,
+            rings: 3,
+            cycles: 1,
+            width: 1.2,
+        },
+        Layer::SunRays {
+            intensity: 0.8,
+            rays: 7,
+            cycles: 1,
+        },
+        Layer::Aurora {
+            intensity: 0.7,
+            bands: 3,
+            cycles: 1,
+        },
+    ])
 }
 
 fn bench(c: &mut Criterion) {
@@ -109,6 +136,20 @@ fn bench(c: &mut Criterion) {
             n = n.wrapping_add(1);
             black_box(render(
                 &s,
+                Input {
+                    frame: n,
+                    audio: &audio,
+                    fade: 1.0,
+                },
+            ))
+        })
+    });
+    let heavy = scene_new();
+    c.bench_function("render 240x70, rings + rays + aurora", |b| {
+        b.iter(|| {
+            n = n.wrapping_add(1);
+            black_box(render(
+                &heavy,
                 Input {
                     frame: n,
                     audio: &audio,

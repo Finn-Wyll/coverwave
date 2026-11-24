@@ -10,12 +10,14 @@
 
 pub mod clip;
 pub mod features;
+pub mod genre;
 pub mod mapping;
 pub mod mask;
 pub mod pca;
 pub mod scenes;
 
 pub use clip::{ClipModel, Embedding};
+pub use genre::GenreFamily;
 pub use pca::Pca;
 pub use scenes::ScenePrompts;
 
@@ -64,6 +66,8 @@ pub struct Models<'a> {
     pub clip: Option<&'a ClipModel>,
     pub scenes: &'a ScenePrompts,
     pub pca: Option<&'a Pca>,
+    /// The track's genre family (biases which layers are chosen).
+    pub genre: GenreFamily,
 }
 
 impl Models<'_> {
@@ -77,6 +81,7 @@ impl Models<'_> {
             },
             prompts_version: self.scenes.version,
             pca: self.pca.map_or("none".to_string(), Pca::version),
+            genre: self.genre.name().to_string(),
         }
     }
 }
@@ -118,6 +123,7 @@ pub fn recipe_with_embedding(
         scene_weights,
         style_dna,
         analysis: models.info(embedding.is_some()),
+        genre: models.genre,
     })
 }
 
@@ -382,6 +388,7 @@ mod tests {
             clip: None,
             scenes: &scenes,
             pca: None,
+            genre: GenreFamily::Unknown,
         };
         let (r, emb) = recipe(&cover, models).unwrap();
         assert!(emb.is_none());

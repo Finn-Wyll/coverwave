@@ -15,6 +15,8 @@ pub struct TrackInfo {
     pub album_artist: Option<String>,
     pub track_no: Option<u32>,
     pub disc_no: Option<u32>,
+    /// As tagged, possibly several ("Rock; Pop").
+    pub genre: Option<String>,
     pub duration_secs: Option<f64>,
 }
 
@@ -52,6 +54,7 @@ impl Track {
                         .map(Into::into),
                 );
                 info.track_no = tag.track();
+                info.genre = clean(tag.genre());
                 info.disc_no = tag.disk();
             }
         }

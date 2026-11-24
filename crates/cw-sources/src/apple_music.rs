@@ -11,7 +11,7 @@ use crate::{ArtRef, Backend, Command, NowPlaying, SourceError};
 use std::path::PathBuf;
 
 /// Prints one tab-separated line: state, name, artist, album, duration,
-/// position, persistent ID, volume. Or `notrunning` / `stopped`.
+/// position, persistent ID, volume, genre. Or `notrunning` / `stopped`.
 pub const STATE_SCRIPT: &str = r#"
 if application "Music" is not running then return "notrunning"
 tell application "Music"
@@ -20,7 +20,7 @@ tell application "Music"
     set t to current track
     set d to duration of t
     set p to player position
-    return st & tab & (name of t) & tab & (artist of t) & tab & (album of t) & tab & (d as string) & tab & (p as string) & tab & (persistent ID of t) & tab & (sound volume as string)
+    return st & tab & (name of t) & tab & (artist of t) & tab & (album of t) & tab & (d as string) & tab & (p as string) & tab & (persistent ID of t) & tab & (sound volume as string) & tab & (genre of t)
 end tell
 "#;
 
@@ -72,6 +72,8 @@ pub fn parse_state(out: &str) -> Result<Option<NowPlaying>, SourceError> {
         playing: f[0].trim() == "playing",
         volume: num(f[7]).map(|v| v.clamp(0.0, 100.0) as u8),
         art: ArtRef::None,
+        genre: f.get(8).and_then(|g| text(g)),
+        isrc: None,
     }))
 }
 
@@ -189,6 +191,14 @@ mod tests {
         );
         assert!(n.playing);
         assert_eq!(n.track_id, "ABCDEF0123");
+        assert_eq!(
+            n.genre, None,
+            "older output without a genre field still parses"
+        );
+        let g = parse_state("playing\tT\tA\tB\t10\t1\tID\t50\tAlternative\n")
+            .unwrap()
+            .unwrap();
+        assert_eq!(g.genre.as_deref(), Some("Alternative"));
     }
 
     #[test]

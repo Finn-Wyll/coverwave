@@ -129,7 +129,26 @@ Analysis budget: under 300ms per new cover on an M-series Mac, and under 5ms on 
 | desert | `heat_shimmer` + `dust` | shimmer amplitude, dust drift |
 | sky | `cloud_drift` | layer count, drift speed, softness |
 
-### Rules
+### Selection v2 (recipe version 2, after M8)
+
+The owner reported getting "the same animation every song". The cause: one fixed effect per scene, and most covers read as "very dark" or neutral. On the 87 playlist covers, about two-thirds got `flicker + fog`, `ambient`, or both. v2 changes three things:
+
+- **More kinds.** 17 new layer kinds in four families, 31 in total, all held to the same constraints (seam, protection and budget tests run per kind, plus a perf bench case):
+  - **Beat & pulse:** `pulse_rings`, `subject_glow` (a highlight travelling round the subject), `eq_bars`.
+  - **Electronic & glitch:** `scanlines`, `row_glitch`, `code_rain`, `chroma_shift`.
+  - **Nature & weather:** `falling_leaves`, `bubbles`, `lightning`, `aurora`, `smoke`, `sun_rays`.
+  - **Space & light:** `starfield`, `twinkle` (dark cells only), `orbit`, `light_sweep`.
+- **More scenes.** `space`, `storm`, `garden`, `party` and `underwater` (prompts version 2). Each scene now offers a **pool** of kinds with affinities (`mapping::pool`).
+- **Genre.** It comes from file tags, Apple Music (`genre of current track`) and Spotify (the first artist's `genres`, looked up once per artist). `cw_analysis::GenreFamily::of_any` folds it into 18 families, each with favoured kinds, an energy bias and a typical tempo.
+- **Score per kind:** `0.75 * sum(scene weight * pool affinity) + 0.45 * genre affinity + seed jitter (0..0.12)`.
+- **Picking layers:**
+  - The best 3 are kept, with at most 1 displacement and at most 2 large-area tints.
+  - A known genre is guaranteed one of its top-3 kinds, replacing the weakest pick of the same class.
+  - Intensity is 0.85 for the strongest and relative for the others.
+- **Caching:** recipes are cached per cover and genre family (`<hash>.<family>.json`), with the embedding shared, so a new genre rebuilds without running the model.
+- **Measured on the 87 covers:** 38 distinct mixes without genre and 73 with mixed genres, and the most common mix appears 4 times (it was the majority before).
+
+### Rules (v1, superseded by v2 above for layer choice)
 - `layer.intensity = scene_weight`. Each scene at or above 0.10 contributes its layers, all at its weight. Layers are then sorted by intensity, ties keep table order, and the top 3 are kept. The neutral scenes' combined weight (if ≥ 0.10) becomes one `ambient` layer, and `ambient` at 0.5 is also the fallback when nothing qualifies. Each scene draws its random parameters from its own ChaCha8 stream, so a scene's look doesn't change when other scenes come and go.
 - **Style DNA → global params** (each mapping is linear and clamped, defined in one table in `cw-analysis/src/mapping.rs`):
   - dna[0] → overall speed multiplier (0.5–1.6)

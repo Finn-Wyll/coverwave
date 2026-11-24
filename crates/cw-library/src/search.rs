@@ -66,6 +66,7 @@ mod tests {
             duration_secs: None,
             play_count: plays,
             last_played: last,
+            genre: None,
         }
     }
 

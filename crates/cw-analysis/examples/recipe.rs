@@ -1,12 +1,16 @@
 //! Prints the motion recipe for a cover image, or its raw CLIP embedding.
 //!
-//! cargo run -p cw-analysis --release --example recipe -- VISION_ONNX IMAGE [PCA_BIN] [--embedding]
+//! cargo run -p cw-analysis --release --example recipe -- VISION_ONNX IMAGE [PCA_BIN] [--embedding] [--genre=NAME]
 
-use cw_analysis::{ClipModel, Models, Pca, ScenePrompts};
+use cw_analysis::{ClipModel, GenreFamily, Models, Pca, ScenePrompts};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let want_embedding = args.iter().any(|a| a == "--embedding");
+    let genre = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--genre="))
+        .map_or(GenreFamily::Unknown, GenreFamily::of_any);
     let pos: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
     if pos.len() < 2 {
         eprintln!("usage: recipe VISION_ONNX IMAGE [PCA_BIN] [--embedding]");
@@ -21,6 +25,7 @@ fn main() {
         clip: Some(&model),
         scenes: &scenes,
         pca: pca.as_ref(),
+        genre,
     };
     let (recipe, embedding) = cw_analysis::recipe(&cover, models).expect("recipe");
     if want_embedding {

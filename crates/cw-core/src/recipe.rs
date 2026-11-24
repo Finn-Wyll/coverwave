@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 /// Bump when the recipe's meaning changes; cached recipes with another
 /// version are rebuilt.
-pub const RECIPE_VERSION: u32 = 1;
+pub const RECIPE_VERSION: u32 = 2;
 
 /// Number of style-DNA components.
 pub const DNA_DIMS: usize = 8;
@@ -49,6 +49,9 @@ pub struct AnalysisInfo {
     pub prompts_version: u32,
     /// Short hash of the PCA file, or "none".
     pub pca: String,
+    /// Genre family that biased the layer choice ("unknown" if none).
+    #[serde(default)]
+    pub genre: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -201,9 +204,146 @@ pub enum Layer {
         cycles: u32,
         softness: f32,
     },
+    /// Beat & pulse: rings spreading from the subject.
+    PulseRings {
+        intensity: f32,
+        rings: u32,
+        cycles: u32,
+        width: f32,
+    },
+    /// Beat & pulse: a soft halo just outside the subject.
+    SubjectGlow {
+        intensity: f32,
+        width: u32,
+        cycles: u32,
+    },
+    /// Beat & pulse: level bars along the bottom edge.
+    EqBars {
+        intensity: f32,
+        bars: u32,
+        height: f32,
+        cycles: u32,
+    },
+    /// Electronic: a bright band rolling down the screen.
+    Scanlines {
+        intensity: f32,
+        cycles: u32,
+        thickness: f32,
+    },
+    /// Electronic: brief horizontal slips of a few rows.
+    RowGlitch {
+        intensity: f32,
+        events: u32,
+        max_shift: u32,
+    },
+    /// Electronic: columns of falling glyphs.
+    CodeRain {
+        intensity: f32,
+        density: f32,
+        fall_cycles: u32,
+    },
+    /// Electronic: a VHS-style ghost of the art in a moving band.
+    ChromaShift {
+        intensity: f32,
+        cycles: u32,
+        offset: u32,
+    },
+    /// Nature: leaves or petals tumbling down.
+    FallingLeaves {
+        intensity: f32,
+        density: f32,
+        fall_cycles: u32,
+        drift_deg: f32,
+    },
+    /// Nature: bubbles rising.
+    Bubbles {
+        intensity: f32,
+        density: f32,
+        rise_cycles: u32,
+    },
+    /// Nature: occasional lightning strikes.
+    Lightning { intensity: f32, strikes: u32 },
+    /// Nature: aurora curtains across the top.
+    Aurora {
+        intensity: f32,
+        bands: u32,
+        cycles: u32,
+    },
+    /// Nature: wisps of smoke drifting up.
+    Smoke {
+        intensity: f32,
+        density: f32,
+        rise_cycles: u32,
+    },
+    /// Nature: slow rays of light from a top corner.
+    SunRays {
+        intensity: f32,
+        rays: u32,
+        cycles: u32,
+    },
+    /// Space: stars streaming outward from the centre.
+    Starfield {
+        intensity: f32,
+        density: f32,
+        cycles: u32,
+    },
+    /// Space: stars twinkling in dark areas.
+    Twinkle {
+        intensity: f32,
+        density: f32,
+        cycles: u32,
+    },
+    /// Space: particles orbiting the subject.
+    Orbit {
+        intensity: f32,
+        count: u32,
+        cycles: u32,
+        radius: f32,
+    },
+    /// Space: a highlight sweeping across the art.
+    LightSweep {
+        intensity: f32,
+        cycles: u32,
+        width: f32,
+    },
     /// Fallback when no scene is strong enough: slow palette breathing.
     Ambient { intensity: f32, cycles: u32 },
 }
+
+/// Every layer kind, as written in JSON.
+pub const LAYER_KINDS: &[&str] = &[
+    "falling_particles",
+    "heat_cycle",
+    "embers",
+    "flicker",
+    "fog",
+    "row_sway",
+    "fireflies",
+    "ripple",
+    "neon_flicker",
+    "rain",
+    "heat_shimmer",
+    "dust",
+    "cloud_drift",
+    "pulse_rings",
+    "subject_glow",
+    "eq_bars",
+    "scanlines",
+    "row_glitch",
+    "code_rain",
+    "chroma_shift",
+    "falling_leaves",
+    "bubbles",
+    "lightning",
+    "aurora",
+    "smoke",
+    "sun_rays",
+    "starfield",
+    "twinkle",
+    "orbit",
+    "light_sweep",
+    "ambient",
+];
 
 impl Layer {
     pub fn intensity(&self) -> f32 {
@@ -221,6 +361,23 @@ impl Layer {
             | Layer::HeatShimmer { intensity, .. }
             | Layer::Dust { intensity, .. }
             | Layer::CloudDrift { intensity, .. }
+            | Layer::PulseRings { intensity, .. }
+            | Layer::SubjectGlow { intensity, .. }
+            | Layer::EqBars { intensity, .. }
+            | Layer::Scanlines { intensity, .. }
+            | Layer::RowGlitch { intensity, .. }
+            | Layer::CodeRain { intensity, .. }
+            | Layer::ChromaShift { intensity, .. }
+            | Layer::FallingLeaves { intensity, .. }
+            | Layer::Bubbles { intensity, .. }
+            | Layer::Lightning { intensity, .. }
+            | Layer::Aurora { intensity, .. }
+            | Layer::Smoke { intensity, .. }
+            | Layer::SunRays { intensity, .. }
+            | Layer::Starfield { intensity, .. }
+            | Layer::Twinkle { intensity, .. }
+            | Layer::Orbit { intensity, .. }
+            | Layer::LightSweep { intensity, .. }
             | Layer::Ambient { intensity, .. } => *intensity,
         }
     }
@@ -241,6 +398,23 @@ impl Layer {
             Layer::HeatShimmer { .. } => "heat_shimmer",
             Layer::Dust { .. } => "dust",
             Layer::CloudDrift { .. } => "cloud_drift",
+            Layer::PulseRings { .. } => "pulse_rings",
+            Layer::SubjectGlow { .. } => "subject_glow",
+            Layer::EqBars { .. } => "eq_bars",
+            Layer::Scanlines { .. } => "scanlines",
+            Layer::RowGlitch { .. } => "row_glitch",
+            Layer::CodeRain { .. } => "code_rain",
+            Layer::ChromaShift { .. } => "chroma_shift",
+            Layer::FallingLeaves { .. } => "falling_leaves",
+            Layer::Bubbles { .. } => "bubbles",
+            Layer::Lightning { .. } => "lightning",
+            Layer::Aurora { .. } => "aurora",
+            Layer::Smoke { .. } => "smoke",
+            Layer::SunRays { .. } => "sun_rays",
+            Layer::Starfield { .. } => "starfield",
+            Layer::Twinkle { .. } => "twinkle",
+            Layer::Orbit { .. } => "orbit",
+            Layer::LightSweep { .. } => "light_sweep",
             Layer::Ambient { .. } => "ambient",
         }
     }

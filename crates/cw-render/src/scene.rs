@@ -109,7 +109,10 @@ enum Effect {
     Particles(Particles),
     Displace(Displace),
     Field(Field),
+    Extra(extra::Extra),
 }
+
+mod extra;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ParticleKind {
@@ -218,7 +221,7 @@ pub fn prepare(recipe: &Recipe, base: CellGrid, art: Rect, ramp: &[char]) -> Sce
         }
     }
     let steps = (ramp.len().max(2) - 1) as f32;
-    let density = base
+    let density: Vec<f32> = base
         .cells()
         .iter()
         .map(|c| {
@@ -246,6 +249,9 @@ pub fn prepare(recipe: &Recipe, base: CellGrid, art: Rect, ramp: &[char]) -> Sce
         accent,
         background,
         speed_sway: recipe.global.sway,
+        protected: &protected,
+        density: &density,
+        loop_frames: recipe.global.loop_frames.max(1),
     };
     let layers = recipe
         .layers
@@ -279,6 +285,9 @@ struct PrepCtx<'a> {
     accent: Rgb,
     background: Rgb,
     speed_sway: f32,
+    protected: &'a [bool],
+    density: &'a [f32],
+    loop_frames: u32,
 }
 
 impl PrepCtx<'_> {
@@ -332,6 +341,13 @@ fn prepare_layer(
     let (w, h) = (c.w as f32, c.h as f32);
     let kind = layer.kind();
     let intensity = layer.intensity().clamp(0.0, 1.0);
+    if let Some(effect) = extra::prepare(layer, c, rng) {
+        return Prepared {
+            kind,
+            intensity,
+            effect,
+        };
+    }
     let effect = match *layer {
         Layer::FallingParticles {
             density,
@@ -660,6 +676,8 @@ fn prepare_layer(
             cycles: cycles.max(1) as i32,
             wavelength: 24.0 + unit(rng) * 16.0,
         }),
+        // The second-generation kinds were handled by `extra::prepare`.
+        _ => unreachable!("{kind} is prepared in scene::extra"),
     };
     let _ = c.background;
     Prepared {
@@ -717,6 +735,9 @@ pub fn render(scene: &Scene, input: Input<'_>) -> Output {
                 (Effect::Particles(p), 2) => {
                     let dens = (p.density * gain_density(audio)).clamp(0.0, 1.0) * fade;
                     particles(scene, p, amp, dens, phase, audio, &mut grid, &mut owner, id)
+                }
+                (Effect::Extra(x), p) if p == extra::pass(x) => {
+                    extra::draw(scene, x, amp, phase, audio, &mut grid, &mut owner, id)
                 }
                 _ => {}
             }

@@ -1,6 +1,7 @@
 use crate::browse::{Action, Browser};
 use crate::cover::{CoverEntry, CoverLoader, RecipeContext, Slot};
 use crate::sources::{SourceKind, Sources};
+use cw_analysis::GenreFamily;
 use cw_audio::{Player, Snapshot};
 use cw_core::{ArtStyle, AudioFrame, CellGrid, Repeat};
 use cw_library::{Library, Lyrics, ScanStats};
@@ -381,6 +382,24 @@ impl App {
         }
     }
 
+    /// Genre family of what is playing (local tags or the remote player).
+    pub fn current_genre(&self) -> GenreFamily {
+        let raw = if self.sources.is_remote() {
+            self.sources
+                .state
+                .as_ref()
+                .and_then(|s| s.now.as_ref())
+                .and_then(|n| n.genre.clone())
+        } else {
+            self.snapshot
+                .as_ref()
+                .zip(self.player.as_ref())
+                .and_then(|(s, p)| s.track.and_then(|t| p.tracks()[t].info.genre.clone()))
+        };
+        raw.as_deref()
+            .map_or(GenreFamily::Unknown, GenreFamily::of_any)
+    }
+
     /// Lyrics of the current track, if any.
     pub fn current_lyrics(&self) -> Option<&Lyrics> {
         let current = self.current_path()?;
@@ -485,10 +504,14 @@ impl App {
                 return;
             };
             let key = format!("{}:{}", self.sources.active.name(), now.track_id);
+            let genre = now
+                .genre
+                .as_deref()
+                .map_or(GenreFamily::Unknown, GenreFamily::of_any);
             let art = now.art.clone();
             self.covers
-                .request_with(&key, move || cw_sources::fetch_art(&art));
-            match self.covers.get_key(&key) {
+                .request_with(&key, genre, move || cw_sources::fetch_art(&art));
+            match self.covers.get_key(&key, genre) {
                 Some(Slot::Ready(c)) => self.shown_cover = Some(c.clone()),
                 Some(Slot::Missing(_)) => self.shown_cover = None,
                 Some(Slot::Loading) | None => {}
@@ -509,10 +532,17 @@ impl App {
             .position(|&o| o == current)
             .and_then(|i| snap.order.get(i + 1))
             .copied();
+        let genre = |t: usize| {
+            tracks[t]
+                .info
+                .genre
+                .as_deref()
+                .map_or(GenreFamily::Unknown, GenreFamily::of_any)
+        };
         for t in std::iter::once(current).chain(next) {
-            self.covers.request(&tracks[t].path);
+            self.covers.request(&tracks[t].path, genre(t));
         }
-        match self.covers.get(&tracks[current].path) {
+        match self.covers.get(&tracks[current].path, genre(current)) {
             Some(Slot::Ready(c)) => self.shown_cover = Some(c.clone()),
             Some(Slot::Missing(_)) => self.shown_cover = None,
             Some(Slot::Loading) | None => {} // keep the previous cover a moment

@@ -10,7 +10,7 @@
 
 use crate::models::{cache_dir, config_dir};
 use cw_analysis::clip::EMBED_DIM;
-use cw_analysis::{ClipModel, Cover, Models, Pca, ScenePrompts};
+use cw_analysis::{ClipModel, Cover, GenreFamily, Models, Pca, ScenePrompts};
 use cw_core::Recipe;
 use cw_core::recipe::RECIPE_VERSION;
 use std::path::PathBuf;
@@ -67,6 +67,7 @@ impl Store {
         clip: Option<&ClipModel>,
         scenes: &ScenePrompts,
         pca: Option<&Pca>,
+        genre: GenreFamily,
     ) -> Loaded {
         let hash = cw_analysis::hash_hex(&cover.hash);
         let mut warning = None;
@@ -86,10 +87,17 @@ impl Store {
             }
         }
 
-        let models = Models { clip, scenes, pca };
+        let models = Models {
+            clip,
+            scenes,
+            pca,
+            genre,
+        };
         let expected = models.info(true);
         let cache = self.cache.as_ref();
-        let json_path = cache.map(|d| d.join(format!("{hash}.json")));
+        // One cached recipe per cover and genre family; the embedding is
+        // shared, so a new genre rebuilds without running the model.
+        let json_path = cache.map(|d| d.join(format!("{hash}.{}.json", genre.name())));
         let emb_path = cache.map(|d| d.join(format!("{hash}.clip.bin")));
 
         if let Some(p) = &json_path
@@ -193,7 +201,7 @@ mod tests {
         let (store, root) = temp_store("emb");
         let scenes = ScenePrompts::shipped();
         let c = cover();
-        let first = store.load(&c, None, &scenes, None);
+        let first = store.load(&c, None, &scenes, None, GenreFamily::Unknown);
         assert_eq!(first.source, Source::NoModel);
         assert!(!root.join("cache").exists());
 
@@ -208,11 +216,11 @@ mod tests {
             encode_embedding(&e),
         )
         .unwrap();
-        let rebuilt = store.load(&c, None, &scenes, None);
+        let rebuilt = store.load(&c, None, &scenes, None, GenreFamily::Unknown);
         assert_eq!(rebuilt.source, Source::Rebuilt);
         assert_eq!(rebuilt.recipe.analysis.model, "mobileclip_s0");
         assert_eq!(rebuilt.recipe.scene_weights.len(), scenes.scenes.len());
-        let cached = store.load(&c, None, &scenes, None);
+        let cached = store.load(&c, None, &scenes, None, GenreFamily::Unknown);
         assert_eq!(cached.source, Source::Cache);
         assert_eq!(cached.recipe, rebuilt.recipe);
         let _ = std::fs::remove_dir_all(&root);
@@ -224,20 +232,22 @@ mod tests {
         let scenes = ScenePrompts::shipped();
         let c = cover();
         let hash = cw_analysis::hash_hex(&c.hash);
-        let mut custom = store.load(&c, None, &scenes, None).recipe;
+        let mut custom = store
+            .load(&c, None, &scenes, None, GenreFamily::Unknown)
+            .recipe;
         custom.accent = cw_analysis::mapping::hex(Rgb(1, 2, 3));
         let dir = root.join("overrides");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("{hash}.json"));
         std::fs::write(&path, serde_json::to_string(&custom).unwrap()).unwrap();
-        let got = store.load(&c, None, &scenes, None);
+        let got = store.load(&c, None, &scenes, None, GenreFamily::Unknown);
         assert_eq!(
             (got.source, got.recipe.accent.as_str()),
             (Source::Override, "#010203")
         );
 
         std::fs::write(&path, "{ not json").unwrap();
-        let got = store.load(&c, None, &scenes, None);
+        let got = store.load(&c, None, &scenes, None, GenreFamily::Unknown);
         assert_eq!(got.source, Source::NoModel);
         assert!(got.warning.unwrap().starts_with("override ignored"));
         let _ = std::fs::remove_dir_all(&root);

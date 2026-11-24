@@ -188,11 +188,30 @@ struct Item {
     show: Option<Named>,
     #[serde(default)]
     images: Vec<Image>,
+    external_ids: Option<ExternalIds>,
 }
 
 #[derive(Deserialize)]
 struct Named {
     name: String,
+    id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExternalIds {
+    isrc: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ArtistResponse {
+    #[serde(default)]
+    genres: Vec<String>,
+}
+
+/// Parses `GET /artists/{id}` into a genre list ("rock; pop").
+pub fn parse_artist_genres(json: &str) -> Option<String> {
+    let a: ArtistResponse = serde_json::from_str(json).ok()?;
+    (!a.genres.is_empty()).then(|| a.genres.join("; "))
 }
 
 #[derive(Deserialize)]
@@ -210,6 +229,11 @@ struct Image {
 
 /// Parses `GET /me/player`.
 pub fn parse_player(json: &str) -> Result<Option<NowPlaying>, SourceError> {
+    Ok(parse_player_full(json)?.map(|(n, _)| n))
+}
+
+/// Like [`parse_player`], also returning the first artist's ID.
+fn parse_player_full(json: &str) -> Result<Option<(NowPlaying, Option<String>)>, SourceError> {
     let p: PlayerResponse = serde_json::from_str(json)
         .map_err(|e| SourceError::Failed(format!("Spotify sent odd data: {e}")))?;
     let Some(item) = p.item else { return Ok(None) };
@@ -219,6 +243,8 @@ pub fn parse_player(json: &str) -> Result<Option<NowPlaying>, SourceError> {
         .iter()
         .max_by_key(|i| i.width.unwrap_or(0))
         .map_or(ArtRef::None, |i| ArtRef::Url(i.url.clone()));
+    let artist_id = item.artists.first().and_then(|a| a.id.clone());
+    let isrc = item.external_ids.and_then(|e| e.isrc);
     let artist = if item.artists.is_empty() {
         item.show.map(|s| s.name)
     } else {
@@ -230,17 +256,22 @@ pub fn parse_player(json: &str) -> Result<Option<NowPlaying>, SourceError> {
                 .join(", "),
         )
     };
-    Ok(Some(NowPlaying {
-        track_id: item.id.or(item.uri).unwrap_or_else(|| item.name.clone()),
-        title: item.name,
-        artist,
-        album: item.album.map(|a| a.name),
-        duration_secs: item.duration_ms.map(|ms| ms as f64 / 1000.0),
-        position_secs: p.progress_ms.unwrap_or(0) as f64 / 1000.0,
-        playing: p.is_playing,
-        volume: p.device.and_then(|d| d.volume_percent),
-        art,
-    }))
+    Ok(Some((
+        NowPlaying {
+            track_id: item.id.or(item.uri).unwrap_or_else(|| item.name.clone()),
+            title: item.name,
+            artist,
+            album: item.album.map(|a| a.name),
+            duration_secs: item.duration_ms.map(|ms| ms as f64 / 1000.0),
+            position_secs: p.progress_ms.unwrap_or(0) as f64 / 1000.0,
+            playing: p.is_playing,
+            volume: p.device.and_then(|d| d.volume_percent),
+            art,
+            genre: None,
+            isrc,
+        },
+        artist_id,
+    )))
 }
 
 struct Login {
@@ -257,6 +288,8 @@ pub struct Spotify {
     /// After a 429, wait until then.
     backoff_until: Option<Instant>,
     last_playing: bool,
+    /// Artist ID -> genres (or none), so each artist is looked up once.
+    genres: std::collections::HashMap<String, Option<String>>,
 }
 
 impl Spotify {
@@ -270,6 +303,7 @@ impl Spotify {
             login: None,
             backoff_until: None,
             last_playing: false,
+            genres: std::collections::HashMap::new(),
         }
     }
 
@@ -508,9 +542,23 @@ impl Backend for Spotify {
         match status {
             204 => Ok(None), // nothing playing
             200 => {
-                let now = parse_player(&body)?;
-                self.last_playing = now.as_ref().is_some_and(|n| n.playing);
-                Ok(now)
+                let Some((mut now, artist_id)) = parse_player_full(&body)? else {
+                    self.last_playing = false;
+                    return Ok(None);
+                };
+                self.last_playing = now.playing;
+                if let Some(id) = artist_id {
+                    if !self.genres.contains_key(&id) {
+                        // Best effort: no genre is fine.
+                        let g = match self.api("GET", &format!("/artists/{}", encode(&id))) {
+                            Ok((200, body)) => parse_artist_genres(&body),
+                            _ => None,
+                        };
+                        self.genres.insert(id.clone(), g);
+                    }
+                    now.genre = self.genres.get(&id).cloned().flatten();
+                }
+                Ok(Some(now))
             }
             s => Err(SourceError::Http(format!("Spotify: HTTP {s}"))),
         }
@@ -550,6 +598,22 @@ mod tests {
     use std::net::TcpStream;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn artist_genres_and_isrc() {
+        assert_eq!(
+            parse_artist_genres(r#"{"genres":["christian rock","worship"]}"#).as_deref(),
+            Some("christian rock; worship")
+        );
+        assert_eq!(parse_artist_genres(r#"{"genres":[]}"#), None);
+        let json = r#"{"is_playing":true,"item":{"id":"t","name":"N",
+            "artists":[{"name":"A","id":"art1"}],"external_ids":{"isrc":"USABC1234567"}}}"#;
+        let (n, artist) = parse_player_full(json).unwrap().unwrap();
+        assert_eq!(
+            (n.isrc.as_deref(), artist.as_deref()),
+            (Some("USABC1234567"), Some("art1"))
+        );
+    }
 
     #[test]
     fn pkce_matches_rfc7636_vector() {

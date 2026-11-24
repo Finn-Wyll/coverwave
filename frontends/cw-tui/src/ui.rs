@@ -716,7 +716,11 @@ fn draw_debug(f: &mut Frame, app: &App, main: Rect) {
     let slot = if app.sources.is_remote() {
         app.shown_cover.clone().map(crate::cover::Slot::Ready)
     } else {
-        playing.as_deref().and_then(|p| app.covers.get(p)).cloned()
+        let genre = app.current_genre();
+        playing
+            .as_deref()
+            .and_then(|p| app.covers.get(p, genre))
+            .cloned()
     };
     let cover = match slot.as_ref() {
         None => "-".to_string(),
@@ -795,6 +799,15 @@ fn draw_recipe(f: &mut Frame, app: &App, main: Rect) {
             Style::new().fg(ERROR),
         )));
     }
+    // Why this motion: the genre family that biased the choice.
+    let genre = match r.analysis.genre.as_str() {
+        "" | "unknown" => "none tagged".to_string(),
+        g => g.replace('_', " "),
+    };
+    lines.push(Line::from(format!(
+        "genre   {}",
+        fit(&genre, OVERLAY_TEXT_W - 8)
+    )));
     lines.push(Line::from(dim(fit(&r.cover_hash, OVERLAY_TEXT_W))));
 
     lines.push(Line::from(""));

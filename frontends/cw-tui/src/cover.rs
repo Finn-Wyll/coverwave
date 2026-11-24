@@ -8,7 +8,7 @@
 
 use crate::models::ModelHandle;
 use crate::recipes::{Loaded, Source, Store};
-use cw_analysis::{Cover, Pca, ScenePrompts};
+use cw_analysis::{Cover, GenreFamily, Pca, ScenePrompts};
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::path::Path;
@@ -56,7 +56,8 @@ pub struct CoverLoader {
     /// Keyed by audio file path, so a replaced queue never shows a stale
     /// cover.
     slots: HashMap<String, Slot>,
-    by_seed: HashMap<u64, Arc<CoverEntry>>,
+    /// Shared entries by (cover seed, genre family).
+    by_seed: HashMap<(u64, &'static str), Arc<CoverEntry>>,
     ctx: Arc<RecipeContext>,
     tx: Sender<Message>,
     rx: Receiver<Message>,
@@ -80,9 +81,9 @@ impl CoverLoader {
 
     /// Starts loading the cover for the audio file at `path` unless it is
     /// already loaded or loading.
-    pub fn request(&mut self, path: &Path) {
+    pub fn request(&mut self, path: &Path, genre: GenreFamily) {
         let p = path.to_path_buf();
-        self.request_with(&local_key(path), move || cw_audio::cover_art(&p));
+        self.request_with(&local_key(path), genre, move || cw_audio::cover_art(&p));
     }
 
     /// Starts loading the cover identified by `key`, whose bytes `fetch`
@@ -91,12 +92,13 @@ impl CoverLoader {
     pub fn request_with(
         &mut self,
         key: &str,
+        genre: GenreFamily,
         fetch: impl FnOnce() -> Option<Vec<u8>> + Send + 'static,
     ) {
-        if self.slots.contains_key(key) {
+        let key = genre_key(key, genre);
+        if self.slots.contains_key(&key) {
             return;
         }
-        let key = key.to_string();
         let path = key.clone();
         self.slots.insert(key.clone(), Slot::Loading);
         let tx = self.tx.clone();
@@ -109,9 +111,13 @@ impl CoverLoader {
                     .and_then(|bytes| cw_analysis::analyse(&bytes).map_err(|e| e.to_string()))
                     .map(|cover| {
                         let clip = ctx.model.ready();
-                        let recipe =
-                            ctx.store
-                                .load(&cover, clip.as_deref(), &ctx.scenes, ctx.pca.as_ref());
+                        let recipe = ctx.store.load(
+                            &cover,
+                            clip.as_deref(),
+                            &ctx.scenes,
+                            ctx.pca.as_ref(),
+                            genre,
+                        );
                         let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         CoverEntry { id, cover, recipe }
                     });
@@ -131,7 +137,7 @@ impl CoverLoader {
                 Ok(entry) => {
                     let shared = self
                         .by_seed
-                        .entry(entry.cover.seed)
+                        .entry((entry.cover.seed, genre_of(&entry)))
                         .or_insert_with(|| Arc::new(entry))
                         .clone();
                     Slot::Ready(shared)
@@ -142,12 +148,12 @@ impl CoverLoader {
         }
     }
 
-    pub fn get(&self, path: &Path) -> Option<&Slot> {
-        self.slots.get(&local_key(path))
+    pub fn get(&self, path: &Path, genre: GenreFamily) -> Option<&Slot> {
+        self.slots.get(&genre_key(&local_key(path), genre))
     }
 
-    pub fn get_key(&self, key: &str) -> Option<&Slot> {
-        self.slots.get(key)
+    pub fn get_key(&self, key: &str, genre: GenreFamily) -> Option<&Slot> {
+        self.slots.get(&genre_key(key, genre))
     }
 
     /// Forgets finished entries matching `pred`, so the next request loads
@@ -162,6 +168,17 @@ impl CoverLoader {
     pub fn invalidate_modelless(&mut self) {
         self.invalidate(|e| e.recipe.source == Source::NoModel);
     }
+}
+
+/// The genre family recorded in an entry's recipe.
+fn genre_of(e: &CoverEntry) -> &'static str {
+    let g = e.recipe.recipe.analysis.genre.as_str();
+    GenreFamily::of(g).name()
+}
+
+/// Slot key: the cover's key plus the genre family that shapes its recipe.
+fn genre_key(key: &str, genre: GenreFamily) -> String {
+    format!("{key}#{}", genre.name())
 }
 
 /// Cache key for a local file's cover.

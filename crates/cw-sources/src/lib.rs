@@ -39,6 +39,10 @@ pub struct NowPlaying {
     /// 0..=100 when the player reports it.
     pub volume: Option<u8>,
     pub art: ArtRef,
+    /// Genre(s) as the service reports them ("Rock; Pop").
+    pub genre: Option<String>,
+    /// International Standard Recording Code, for tempo lookups.
+    pub isrc: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,6 +224,8 @@ mod tests {
                 playing: self.playing,
                 volume: Some(50),
                 art: ArtRef::None,
+                genre: None,
+                isrc: None,
             }))
         }
         fn command(&mut self, c: &Command) -> Result<(), SourceError> {

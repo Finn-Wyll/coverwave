@@ -67,6 +67,7 @@ fn recipe(layers: Vec<Layer>, energy: f32, seed: u64) -> Recipe {
             model: "test".into(),
             prompts_version: 1,
             pca: "none".into(),
+            genre: String::new(),
         },
         scene_weights: Default::default(),
         style_dna: [0.0; 8],
@@ -189,6 +190,94 @@ fn every_kind() -> Vec<Layer> {
             intensity: 0.8,
             cycles: 1,
         },
+        Layer::PulseRings {
+            intensity: 0.8,
+            rings: 2,
+            cycles: 1,
+            width: 1.0,
+        },
+        Layer::SubjectGlow {
+            intensity: 0.8,
+            width: 2,
+            cycles: 1,
+        },
+        Layer::EqBars {
+            intensity: 0.8,
+            bars: 16,
+            height: 0.3,
+            cycles: 2,
+        },
+        Layer::Scanlines {
+            intensity: 0.8,
+            cycles: 2,
+            thickness: 0.05,
+        },
+        Layer::RowGlitch {
+            intensity: 0.8,
+            events: 4,
+            max_shift: 3,
+        },
+        Layer::CodeRain {
+            intensity: 0.8,
+            density: 0.4,
+            fall_cycles: 2,
+        },
+        Layer::ChromaShift {
+            intensity: 0.8,
+            cycles: 1,
+            offset: 1,
+        },
+        Layer::FallingLeaves {
+            intensity: 0.8,
+            density: 0.3,
+            fall_cycles: 1,
+            drift_deg: 100.0,
+        },
+        Layer::Bubbles {
+            intensity: 0.8,
+            density: 0.3,
+            rise_cycles: 1,
+        },
+        Layer::Lightning {
+            intensity: 0.8,
+            strikes: 2,
+        },
+        Layer::Aurora {
+            intensity: 0.8,
+            bands: 2,
+            cycles: 1,
+        },
+        Layer::Smoke {
+            intensity: 0.8,
+            density: 0.3,
+            rise_cycles: 1,
+        },
+        Layer::SunRays {
+            intensity: 0.8,
+            rays: 5,
+            cycles: 1,
+        },
+        Layer::Starfield {
+            intensity: 0.8,
+            density: 0.3,
+            cycles: 1,
+        },
+        Layer::Twinkle {
+            intensity: 0.8,
+            density: 0.3,
+            cycles: 2,
+        },
+        Layer::Orbit {
+            intensity: 0.8,
+            count: 8,
+            cycles: 1,
+            radius: 0.6,
+        },
+        Layer::LightSweep {
+            intensity: 0.8,
+            cycles: 1,
+            width: 0.12,
+        },
     ]
 }
 
@@ -201,6 +290,37 @@ fn frame(s: &Scene, n: u32, audio: &AudioFrame) -> Output {
             fade: 1.0,
         },
     )
+}
+
+#[test]
+fn every_kind_alone_stays_within_budget() {
+    for layer in every_kind() {
+        let kind = layer.kind();
+        let s = scene_for(&recipe(vec![layer], 0.3, 21), W, H);
+        for audio in [quiet(), loud()] {
+            let worst = (0..s.loop_frames())
+                .map(|n| {
+                    frame(&s, n, &audio)
+                        .grid
+                        .diff_count(&frame(&s, n + 1, &audio).grid)
+                })
+                .max()
+                .unwrap();
+            assert!(
+                worst <= s.max_changes(),
+                "{kind}: {worst} > {}",
+                s.max_changes()
+            );
+        }
+    }
+}
+
+#[test]
+fn every_kind_is_covered() {
+    let kinds: Vec<&str> = every_kind().iter().map(Layer::kind).collect();
+    for k in cw_core::recipe::LAYER_KINDS {
+        assert!(kinds.contains(k), "{k} missing from every_kind()");
+    }
 }
 
 #[test]
@@ -291,58 +411,23 @@ fn random_recipe(seed: u64) -> Recipe {
     let mut layers = Vec::new();
     for _ in 0..n {
         let i = (u() * kinds.len() as f32) as usize % kinds.len();
-        let mut l = kinds.swap_remove(i);
-        let intensity = 0.1 + 0.9 * u();
-        match &mut l {
-            Layer::FallingParticles {
-                intensity: x,
-                density,
-                ..
+        let l = kinds.swap_remove(i);
+        // Randomise through the JSON form, so every kind (now and future)
+        // is covered without listing them here.
+        let mut v = serde_json::to_value(&l).unwrap();
+        let o = v.as_object_mut().unwrap();
+        o.insert("intensity".into(), (0.1 + 0.9 * u()).into());
+        for key in ["density", "amplitude"] {
+            if o.contains_key(key) {
+                let val = if key == "density" {
+                    0.05 + 0.6 * u()
+                } else {
+                    0.3 + 1.8 * u()
+                };
+                o.insert(key.into(), val.into());
             }
-            | Layer::Embers {
-                intensity: x,
-                density,
-                ..
-            }
-            | Layer::Dust {
-                intensity: x,
-                density,
-                ..
-            }
-            | Layer::Rain {
-                intensity: x,
-                density,
-                ..
-            }
-            | Layer::Fog {
-                intensity: x,
-                density,
-                ..
-            } => {
-                *x = intensity;
-                *density = 0.6 * u() + 0.05;
-            }
-            Layer::Ripple {
-                intensity: x,
-                amplitude,
-                ..
-            }
-            | Layer::RowSway {
-                intensity: x,
-                amplitude,
-                ..
-            } => {
-                *x = intensity;
-                *amplitude = 0.3 + 1.8 * u();
-            }
-            Layer::HeatCycle { intensity: x, .. }
-            | Layer::Flicker { intensity: x, .. }
-            | Layer::Fireflies { intensity: x, .. }
-            | Layer::NeonFlicker { intensity: x, .. }
-            | Layer::HeatShimmer { intensity: x, .. }
-            | Layer::CloudDrift { intensity: x, .. }
-            | Layer::Ambient { intensity: x, .. } => *x = intensity,
         }
+        let l: Layer = serde_json::from_value(v).unwrap();
         layers.push(l);
     }
     layers.sort_by(|a, b| b.intensity().total_cmp(&a.intensity()));

@@ -173,6 +173,17 @@ Spotify server.
 - [ ] Switching to a remote source pauses local playback. Playing something
       from the library switches back to Local.
 
+## Variety (genre + 31 animations)
+
+- [ ] Play a mix of albums. Covers should now differ clearly, and songs of
+      one genre should feel related. `D` twice shows `genre` and the
+      layers. Your library re-reads tags once after this update, to pick up
+      genres.
+- [ ] Any new effect too busy for your taste? Name it. They are all tunable
+      in `crates/cw-render/src/scene/extra.rs`.
+- [ ] Spotify: genre comes from the artist; Apple Music: from the track.
+      Check that the recipe page shows a genre for both.
+
 ## M8: Windows and CI (optional)
 
 Nothing here has run on Windows yet.

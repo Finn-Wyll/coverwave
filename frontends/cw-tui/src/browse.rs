@@ -359,6 +359,7 @@ fn lib_track(lib: Option<&Library>, path: &Path) -> LibTrack {
         duration_secs: i.duration_secs,
         play_count: 0,
         last_played: None,
+        genre: i.genre,
     }
 }
 
