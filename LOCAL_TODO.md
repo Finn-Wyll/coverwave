@@ -186,8 +186,10 @@ Spotify server.
       nothing is playing anywhere, you get "no active Spotify device".
 - [ ] The progress bar moves smoothly between polls and corrects itself
       after a seek.
-- [ ] The cover reacts to the music (captured), not only gentle default
-      motion. `D` shows `capture on, 48000 Hz`.
+- [x] The cover reacts to the music (captured), not only gentle default
+      motion. `D` shows `capture on, 48000 Hz`. (2026-11-24: capture ran but
+      heard silence until the owner granted the missing permission in System
+      Settings > Privacy & Security > Screen & System Audio Recording.)
 
 ### Apple Music (`crates/cw-sources/src/apple_music.rs`)
 - [ ] `S` → Apple Music: macOS asks whether your terminal may control Music
