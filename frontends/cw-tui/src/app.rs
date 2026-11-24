@@ -223,6 +223,10 @@ pub struct App {
     /// The frame shown before a cover change and when the change began,
     /// for the dissolve into the new cover.
     pub dissolve: Option<(cw_core::CellGrid, u32)>,
+    /// Set by ctrl-l: repaint the whole screen on the next frame.
+    redraw_requested: bool,
+    /// Where stderr is logged while the UI runs (debug overlay).
+    pub stderr_log: Option<PathBuf>,
     frame_times: VecDeque<Instant>,
 }
 
@@ -281,8 +285,15 @@ impl App {
             fade_start: 0,
             motion_level: 1.0,
             dissolve: None,
+            redraw_requested: false,
+            stderr_log: None,
             frame_times: VecDeque::with_capacity(64),
         }
+    }
+
+    /// Whether ctrl-l asked for a full repaint (clears the request).
+    pub fn take_redraw_request(&mut self) -> bool {
+        std::mem::take(&mut self.redraw_requested)
     }
 
     /// Whether music is playing right now, locally or in the followed app.
@@ -600,6 +611,10 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('c') {
             self.should_quit = true;
+            return;
+        }
+        if ctrl && key.code == KeyCode::Char('l') {
+            self.redraw_requested = true;
             return;
         }
         // Text input first: the playlist-name prompt, then search.

@@ -715,6 +715,13 @@ fn draw_debug(f: &mut Frame, app: &App, main: Rect) {
         lines.push(Line::from(format!("status  {:?}", s.status)));
         lines.push(Line::from(format!("pos     {:.2}s", s.position_secs)));
     }
+    if let Some(log) = &app.stderr_log {
+        // Native messages that would have scribbled on the screen go here.
+        let name = log
+            .file_name()
+            .map_or(String::new(), |n| n.to_string_lossy().into_owned());
+        lines.push(Line::from(format!("stderr  {name}")));
+    }
     lines.push(Line::from(format!(
         "style   {} / {}",
         app.art_style.name(),
@@ -922,6 +929,7 @@ const KEYS: &[(&str, &str)] = &[
     ("up  down", "move in library (or j k)"),
     ("D", "debug overlay: stats, recipe, off"),
     ("R", "reload the cover's recipe"),
+    ("ctrl-l", "redraw the screen"),
     ("?", "close this help"),
     ("q", "quit"),
 ];
