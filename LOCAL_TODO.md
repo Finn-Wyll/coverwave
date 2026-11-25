@@ -313,9 +313,8 @@ things on the first run.
 
 - [ ] Install `coverwave-android.apk` from the latest build. It opens on the
       connect screen; the cover-analysis model downloads (top-left status).
-- [ ] Spotify: add the client ID (repository variable `SPOTIFY_CLIENT_ID`,
-      or paste it in Settings), and in the Spotify dashboard add the redirect
-      URI `coverwave://spotify-callback` and the Android package
+- [ ] Spotify (your client ID is built in): in the Spotify dashboard add
+      the redirect URI `coverwave://spotify-callback` and the Android package
       `app.coverwave` with SHA-1
       `1F:C1:54:69:E7:2A:EB:2D:2A:42:44:F8:C3:AD:0E:28:49:38:74:32`.
       Then log in, play something, and check the cover moves to the beat.

@@ -31,10 +31,11 @@ In your app at developer.spotify.com:
   `1F:C1:54:69:E7:2A:EB:2D:2A:42:44:F8:C3:AD:0E:28:49:38:74:32`
   (the committed key's fingerprint; Offline needs it).
 
-The client ID is built in when the repository variable `SPOTIFY_CLIENT_ID`
-is set (Settings > Secrets and variables > Actions > Variables), or when
-`spotify.clientId=...` is in `android/local.properties` for local builds.
-Without one, paste it into the app's Settings.
+Your app's client ID is built in (`coverwave.spotifyClientId` in
+`android/gradle.properties`; it is public, PKCE apps have no secret).
+`SPOTIFY_CLIENT_ID` in the environment or `spotify.clientId` in
+`android/local.properties` override it, and the app's Settings take one if a
+build has none.
 
 ## Build it yourself
 

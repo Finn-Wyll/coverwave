@@ -8,15 +8,16 @@ plugins {
 
 // The Spotify app's public client ID: SPOTIFY_CLIENT_ID in the environment
 // (the Release workflow passes the repository variable), else
-// `spotify.clientId` in android/local.properties. Without one, the app asks
-// for it in Settings.
+// `spotify.clientId` in android/local.properties, else the owner's ID in
+// android/gradle.properties. Without any, the app asks for it in Settings.
 val localProps = Properties().apply {
     val f = rootProject.file("local.properties")
     if (f.exists()) f.inputStream().use { load(it) }
 }
 val spotifyClientId: String =
     System.getenv("SPOTIFY_CLIENT_ID")?.takeIf { it.isNotBlank() }
-        ?: localProps.getProperty("spotify.clientId", "")
+        ?: localProps.getProperty("spotify.clientId")?.takeIf { it.isNotBlank() }
+        ?: (findProperty("coverwave.spotifyClientId") as String?).orEmpty()
 
 android {
     namespace = "app.coverwave"
