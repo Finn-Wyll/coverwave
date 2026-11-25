@@ -19,7 +19,13 @@ The SwiftUI app, built on the same Rust core as the terminal app
    signs with your team and installs on the connected iPhone.
 
 Apps signed with a free Apple account stop opening after 7 days; run step 3
-again. TestFlight needs a paid developer account.
+again, or let the Mac do it: `ios/install-auto-resign.sh` sets up a launch
+agent that checks every hour and, when the app expires within 2 days and
+your iPhone is reachable (cable, or paired on the same Wi-Fi), re-signs and
+reinstalls it and posts a notification. `ios/auto-resign.sh --check` says
+what it would do; `--uninstall` on the installer removes it. It runs from
+this checkout, so keep the folder. The Mac must be awake and logged in.
+TestFlight needs a paid developer account.
 
 ## Files that are made, not committed
 
