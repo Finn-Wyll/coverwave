@@ -20,6 +20,9 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+The bundled font assets/fonts/SpaceMono-Bold.ttf (The Space Mono Project
+Authors) is under the SIL Open Font License 1.1: assets/fonts/SpaceMono-OFL.txt.
+
 Third-party models are not covered by this licence and are not in the
 repository:
 - MobileCLIP-S0 (Apple), downloaded at first run: research and personal use

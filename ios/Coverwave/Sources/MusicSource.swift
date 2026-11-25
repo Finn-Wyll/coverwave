@@ -5,6 +5,9 @@ import Foundation
 enum SourceKind: String, CaseIterable, Identifiable {
     case spotify
     case appleMusic
+    /// Spotify with no internet: follows the Spotify app on this iPhone
+    /// (its downloads) and uses only what was saved ahead.
+    case offline
 
     var id: String { rawValue }
 
@@ -12,6 +15,16 @@ enum SourceKind: String, CaseIterable, Identifiable {
         switch self {
         case .spotify: "Spotify"
         case .appleMusic: "Apple Music"
+        case .offline: "Offline"
+        }
+    }
+
+    /// One line under the name on the start screen.
+    var blurb: String {
+        switch self {
+        case .spotify: "follows spotify on any device"
+        case .appleMusic: "follows the music app"
+        case .offline: "spotify downloads, no internet"
         }
     }
 
@@ -19,6 +32,7 @@ enum SourceKind: String, CaseIterable, Identifiable {
         switch self {
         case .spotify: "headphones"
         case .appleMusic: "music.note"
+        case .offline: "wifi.slash"
         }
     }
 }

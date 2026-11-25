@@ -11,6 +11,8 @@
 //! - [`draw_synced`] wraps each frame in a synchronized update (DEC mode
 //!   2026), so terminals that support it show whole frames instead of
 //!   half-drawn ones. Terminals without it ignore the sequence.
+//!
+//! Also [`FontZoom`]: a smaller font in Ghostty while coverwave runs.
 
 use ratatui::crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use std::io::Write;
@@ -103,14 +105,145 @@ impl Drop for StderrToLog {
     }
 }
 
-/// Installs a panic hook that restores stderr and then runs the existing
-/// hook (ratatui's, which restores the terminal and prints the message).
+/// Installs a panic hook that restores stderr and the font size, then runs
+/// the existing hook (ratatui's, which restores the terminal and prints the
+/// message).
 pub fn hook_panics() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore_stderr();
+        restore_font();
         previous(info);
     }));
+}
+
+/// While alive, coverwave's own Ghostty window uses a smaller font, so the
+/// cover is drawn with more, finer characters. Dropping it (or a panic)
+/// resets the font. Only Ghostty on macOS: it runs actions on one terminal,
+/// found by its tty, through AppleScript (Ghostty 1.4 and later). Other tabs
+/// and windows are untouched; other terminals are left alone.
+pub struct FontZoom(());
+
+/// The tty whose font was changed, for the reset (also from the panic hook).
+static ZOOMED_TTY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+impl FontZoom {
+    /// Sets the font to `points`. `None` if `points` is 0, the terminal is
+    /// not Ghostty, or Ghostty refused.
+    pub fn start(points: f32) -> Option<FontZoom> {
+        if points.is_nan()
+            || points <= 0.0
+            || std::env::var("TERM_PROGRAM").as_deref() != Ok("ghostty")
+        {
+            return None;
+        }
+        let tty = own_tty()?;
+        if !ghostty_action(&tty, &format!("set_font_size:{points}")) {
+            return None;
+        }
+        *ZOOMED_TTY.lock().unwrap_or_else(|e| e.into_inner()) = Some(tty);
+        Some(FontZoom(()))
+    }
+}
+
+impl Drop for FontZoom {
+    fn drop(&mut self) {
+        restore_font();
+    }
+}
+
+/// Changes coverwave's Ghostty font while it runs (0 puts it back). False
+/// outside Ghostty, or if Ghostty refused.
+pub fn set_font_size(points: f32) -> bool {
+    if points.is_nan() || points <= 0.0 {
+        restore_font();
+        return true;
+    }
+    if std::env::var("TERM_PROGRAM").as_deref() != Ok("ghostty") {
+        return false;
+    }
+    let Some(tty) = own_tty() else { return false };
+    if !ghostty_action(&tty, &format!("set_font_size:{points}")) {
+        return false;
+    }
+    *ZOOMED_TTY.lock().unwrap_or_else(|e| e.into_inner()) = Some(tty);
+    true
+}
+
+/// Resets the font changed by [`FontZoom`], if any. Safe to call twice.
+pub fn restore_font() {
+    let tty = ZOOMED_TTY.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(tty) = tty {
+        ghostty_action(&tty, "reset_font_size");
+    }
+}
+
+/// The terminal device this process runs on (`/dev/ttys003`).
+#[cfg(unix)]
+fn own_tty() -> Option<String> {
+    use std::os::fd::AsRawFd;
+    let fd = std::io::stdout().as_raw_fd();
+    // SAFETY: ttyname returns a pointer to a static buffer or null; it is
+    // copied out at once, on this thread.
+    unsafe {
+        let p = libc::ttyname(fd);
+        (!p.is_null()).then(|| std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned())
+    }
+}
+
+#[cfg(not(unix))]
+fn own_tty() -> Option<String> {
+    None
+}
+
+/// Performs a Ghostty action on the terminal with this tty. True if done.
+#[cfg(target_os = "macos")]
+fn ghostty_action(tty: &str, action: &str) -> bool {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    // Both values come from coverwave itself (a /dev path and a fixed
+    // action), never from outside input.
+    let script = format!(
+        "tell application \"Ghostty\"\n\
+         repeat with t in terminals\n\
+         if tty of t is \"{tty}\" then return perform action \"{action}\" on t\n\
+         end repeat\n\
+         return false\n\
+         end tell"
+    );
+    // Null stdio: nothing may print over the UI (term.rs hygiene).
+    let Ok(mut child) = Command::new("osascript")
+        .args(["-e", &script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut out = String::new();
+                if let Some(mut o) = child.stdout.take() {
+                    use std::io::Read;
+                    let _ = o.read_to_string(&mut out);
+                }
+                return status.success() && out.trim() == "true";
+            }
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                return false;
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ghostty_action(_tty: &str, _action: &str) -> bool {
+    false
 }
 
 #[cfg(all(test, unix))]

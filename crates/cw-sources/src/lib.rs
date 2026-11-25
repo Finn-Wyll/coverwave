@@ -9,11 +9,16 @@
 
 pub mod apple_music;
 #[cfg(feature = "http")]
+pub mod lrclib;
+pub mod offline;
+#[cfg(feature = "http")]
 pub mod spotify;
+pub mod spotify_app;
 #[cfg(feature = "http")]
 pub mod tempo;
 mod util;
 
+use serde::{Deserialize, Serialize};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -47,10 +52,12 @@ pub struct NowPlaying {
     pub isrc: Option<String>,
     /// Tempo, once looked up (see `tempo`); filled in by [`RemoteHandle`].
     pub bpm: Option<f32>,
+    /// Spotify: the device playing ("Finnley's iPhone").
+    pub device: Option<String>,
 }
 
 /// A place in a remote library.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LibraryPath {
     /// The top level: liked songs, playlists, albums.
     Root,
@@ -73,6 +80,8 @@ pub enum LibraryPath {
     Search {
         query: String,
     },
+    /// Spotify Connect devices to move playback to.
+    Devices,
 }
 
 impl LibraryPath {
@@ -85,12 +94,13 @@ impl LibraryPath {
             LibraryPath::Albums => "Albums",
             LibraryPath::Playlist { name, .. } | LibraryPath::Album { name, .. } => name,
             LibraryPath::Search { query } => query,
+            LibraryPath::Devices => "Devices",
         }
     }
 }
 
 /// One row of a remote library listing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibraryItem {
     pub title: String,
     /// Artist, owner or other context.
@@ -102,17 +112,19 @@ pub struct LibraryItem {
     pub action: ItemAction,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ItemAction {
     /// Open a nested listing.
     Open(LibraryPath),
     /// Start playback.
     Play(PlayRequest),
+    /// Move playback to a device (`id`, display name).
+    Transfer { id: String, name: String },
 }
 
 /// What to start playing, Spotify-style: a context (album or playlist URI),
 /// optionally starting at one of its tracks, or an explicit list of tracks.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PlayRequest {
     pub context_uri: Option<String>,
     /// Start at this track within the context.
@@ -146,6 +158,13 @@ pub enum Command {
     Browse(LibraryPath),
     /// Start playing something from the library.
     Play(PlayRequest),
+    /// Move playback to this device ID, keeping it playing or paused.
+    Transfer(String),
+    /// Spotify: with `true`, never use the internet (follow the Spotify app
+    /// and use what was saved); with `false`, only when it is unreachable.
+    OfflineMode(bool),
+    /// Spotify: what to save ahead for offline use.
+    SaveAhead(offline::SaveAhead),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +185,9 @@ pub enum SourceError {
     NeedsLogin,
     #[error("{0}")]
     Http(String),
+    /// The service could not be reached (no network).
+    #[error("offline: {0}")]
+    Offline(String),
     #[error("{0}")]
     Failed(String),
 }
@@ -208,6 +230,9 @@ pub trait Backend: Send + 'static {
     fn poll_interval(&self) -> Duration {
         Duration::from_secs(1)
     }
+    /// Spare time between polls (a second at most): sources do slow
+    /// housekeeping here, a step at a time, such as saving ahead.
+    fn background(&mut self) {}
     /// Lists part of the user's library. Sources without one say so.
     fn browse(&mut self, _path: &LibraryPath) -> Result<Vec<LibraryItem>, SourceError> {
         Err(SourceError::Unavailable(format!(
@@ -270,7 +295,10 @@ impl RemoteHandle {
                     if let Ok(Some(now)) = r.as_mut() {
                         let mut known = tempos.lock().unwrap_or_else(|e| e.into_inner());
                         match known.get(&now.track_id) {
-                            Some(bpm) => now.bpm = *bpm,
+                            // A tempo the source already knows (saved ahead) wins.
+                            Some(bpm) if now.bpm.is_none() => now.bpm = *bpm,
+                            Some(_) => {}
+                            None if now.bpm.is_some() => {}
                             None if tempo_lookup => {
                                 known.insert(now.track_id.clone(), None);
                                 spawn_tempo_lookup(now.clone(), tempos.clone());
@@ -314,7 +342,7 @@ impl RemoteHandle {
                             // Let the player apply the command before re-reading.
                             std::thread::sleep(Duration::from_millis(150));
                         }
-                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Timeout) => backend.background(),
                         Err(RecvTimeoutError::Disconnected) => return,
                     }
                 }
@@ -396,6 +424,7 @@ mod tests {
                 genre: None,
                 isrc: None,
                 bpm: None,
+                device: None,
             }))
         }
         fn command(&mut self, c: &Command) -> Result<(), SourceError> {

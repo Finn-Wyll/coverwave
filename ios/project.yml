@@ -14,6 +14,7 @@ settings:
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
 packages:
+  # App Remote: follows the Spotify app on the phone while offline.
   SpotifyiOS:
     url: https://github.com/spotify/ios-sdk
     exactVersion: 5.0.1

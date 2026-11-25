@@ -10,14 +10,16 @@
 //! Playback control (play/pause, skip, seek, volume) needs Spotify Premium.
 //! Without it the player still shows now-playing and the cover.
 
+use crate::offline::{OfflineStore, SaveAhead, TrackRecord};
 use crate::util::{agent, base64url, encode, form, open_browser, query_param};
 use crate::{
     ArtRef, Auth, Backend, Command, ItemAction, LibraryItem, LibraryPath, NowPlaying, PlayRequest,
-    SourceError,
+    SourceError, spotify_app,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::sync::Mutex;
@@ -41,6 +43,23 @@ const DEVICE_WAIT: Duration = Duration::from_secs(10);
 pub const DEFAULT_PORT: u16 = 8898;
 /// How long the login listener waits for the browser.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
+/// After the Web API could not be reached, follow the Spotify app this long
+/// before trying the Web API again.
+const RETRY_ONLINE: Duration = Duration::from_secs(30);
+/// How often the library is saved ahead again.
+const SAVE_EVERY_SECS: u64 = 12 * 3600;
+
+/// A transport failure (no network, DNS, timeout) reads as offline; other
+/// errors stay HTTP errors.
+fn transport(e: ureq::Error) -> SourceError {
+    match e {
+        ureq::Error::Io(_)
+        | ureq::Error::HostNotFound
+        | ureq::Error::ConnectionFailed
+        | ureq::Error::Timeout(_) => SourceError::Offline(e.to_string()),
+        other => SourceError::Http(other.to_string()),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SpotifyConfig {
@@ -189,6 +208,7 @@ struct PlayerResponse {
 #[derive(Deserialize)]
 struct Device {
     volume_percent: Option<u8>,
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -281,11 +301,12 @@ fn parse_player_full(json: &str) -> Result<Option<(NowPlaying, Option<String>)>,
             duration_secs: item.duration_ms.map(|ms| ms as f64 / 1000.0),
             position_secs: p.progress_ms.unwrap_or(0) as f64 / 1000.0,
             playing: p.is_playing,
-            volume: p.device.and_then(|d| d.volume_percent),
+            volume: p.device.as_ref().and_then(|d| d.volume_percent),
             art,
             genre: None,
             isrc,
             bpm: None,
+            device: p.device.and_then(|d| d.name),
         },
         artist_id,
     )))
@@ -309,6 +330,16 @@ pub struct Spotify {
     genres: std::collections::HashMap<String, Option<String>>,
     /// The logged-in user's id, once looked up.
     user: Option<String>,
+    /// What was saved for offline use (`None`: nothing is kept).
+    offline_store: Option<OfflineStore>,
+    /// Never use the internet: follow the Spotify app (offline mode).
+    always_offline: bool,
+    /// The Web API was unreachable: follow the app until then.
+    offline_until: Option<Instant>,
+    save_ahead: SaveAhead,
+    /// Listings still to save in this save-ahead pass.
+    to_save: VecDeque<LibraryPath>,
+    saving: bool,
 }
 
 impl Spotify {
@@ -324,6 +355,147 @@ impl Spotify {
             last_playing: false,
             genres: std::collections::HashMap::new(),
             user: None,
+            offline_store: None,
+            always_offline: false,
+            offline_until: None,
+            save_ahead: SaveAhead::Off,
+            to_save: VecDeque::new(),
+            saving: false,
+        }
+    }
+
+    /// Keeps listings and track details in `store` for offline use, saving
+    /// `save` ahead; with `always_offline`, never uses the internet.
+    pub fn with_offline(
+        mut self,
+        store: OfflineStore,
+        always_offline: bool,
+        save: SaveAhead,
+    ) -> Spotify {
+        self.offline_store = Some(store);
+        self.always_offline = always_offline;
+        self.save_ahead = save;
+        self
+    }
+
+    /// Following the Spotify app instead of the Web API.
+    pub fn is_offline(&self) -> bool {
+        self.always_offline || self.offline_until.is_some_and(|t| Instant::now() < t)
+    }
+
+    /// Notes an unreachable Web API, and passes the error on.
+    fn note(&mut self, e: SourceError) -> SourceError {
+        if matches!(e, SourceError::Offline(_)) {
+            self.offline_until = Some(Instant::now() + RETRY_ONLINE);
+        }
+        e
+    }
+
+    /// What the app is playing, filled in from what was saved.
+    fn poll_app(&mut self) -> Result<Option<NowPlaying>, SourceError> {
+        let Some(mut now) = spotify_app::poll()? else {
+            return Ok(None);
+        };
+        if let Some(store) = &self.offline_store {
+            if let Some(r) = store.record(&now.track_id) {
+                now.genre = r.genre;
+                now.isrc = r.isrc;
+                now.bpm = r.bpm;
+                if now.art == ArtRef::None {
+                    now.art = r.art_url.map_or(ArtRef::None, ArtRef::Url);
+                }
+            }
+            if let Some(file) = store.cover_path(&now.track_id) {
+                now.art = ArtRef::File(file);
+            }
+        }
+        Ok(Some(now))
+    }
+
+    /// A saved listing, or why there is none.
+    fn saved(&self, path: &LibraryPath) -> Result<Vec<LibraryItem>, SourceError> {
+        let none = || {
+            SourceError::Offline(
+                "not saved for offline yet: open it once while online, or turn on save ahead"
+                    .into(),
+            )
+        };
+        let store = self.offline_store.as_ref().ok_or_else(none)?;
+        match path {
+            LibraryPath::Search { query } => Ok(store
+                .search(query, 50)
+                .into_iter()
+                .map(|r| LibraryItem {
+                    title: r.title,
+                    subtitle: r.artist,
+                    count: None,
+                    duration_secs: r.duration_secs.map(|d| d as u32),
+                    action: ItemAction::Play(PlayRequest {
+                        uris: vec![r.uri],
+                        ..Default::default()
+                    }),
+                })
+                .collect()),
+            LibraryPath::Devices => Err(SourceError::Offline(
+                "devices need the internet; offline, Spotify plays on this computer".into(),
+            )),
+            _ => store.listing(path).ok_or_else(none),
+        }
+    }
+
+    /// Records the tracks of a listing (and their covers' URLs).
+    fn remember(&self, tracks: &[Value]) {
+        if let Some(store) = &self.offline_store {
+            store.upsert(tracks.iter().filter_map(track_record));
+            store.flush();
+        }
+    }
+
+    /// One step of saving ahead: one listing per call.
+    fn save_step(&mut self) {
+        if self.offline_store.is_none()
+            || self.save_ahead == SaveAhead::Off
+            || self.is_offline()
+            || self.login.is_some()
+            || self.refresh.is_none()
+        {
+            return;
+        }
+        if !self.saving {
+            let due = self
+                .offline_store
+                .as_ref()
+                .is_some_and(|s| s.since_last_pass() > SAVE_EVERY_SECS);
+            if !due {
+                return;
+            }
+            self.saving = true;
+            self.to_save = VecDeque::from([LibraryPath::Root, LibraryPath::LikedSongs]);
+            if self.save_ahead == SaveAhead::All {
+                self.to_save.push_back(LibraryPath::Playlists);
+            }
+        }
+        let Some(path) = self.to_save.pop_front() else {
+            self.saving = false;
+            if let Some(s) = &self.offline_store {
+                s.finish_pass();
+            }
+            return;
+        };
+        match self.browse(&path) {
+            Ok(items) if path == LibraryPath::Playlists => {
+                for item in items {
+                    if let ItemAction::Open(p @ LibraryPath::Playlist { .. }) = item.action {
+                        self.to_save.push_back(p);
+                    }
+                }
+            }
+            Ok(_) => {}
+            // Try again next pass (offline now, or not allowed).
+            Err(_) => {
+                self.saving = false;
+                self.to_save.clear();
+            }
         }
     }
 
@@ -392,7 +564,7 @@ impl Spotify {
             .post(&url)
             .content_type("application/x-www-form-urlencoded")
             .send(body)
-            .map_err(|e| SourceError::Http(e.to_string()))?;
+            .map_err(transport)?;
         let status = resp.status().as_u16();
         let text = resp.body_mut().read_to_string().unwrap_or_default();
         if status == 400 || status == 401 {
@@ -476,7 +648,7 @@ impl Spotify {
                     .header("Content-Type", json)
                     .send(b),
             };
-            let mut resp = result.map_err(|e| SourceError::Http(e.to_string()))?;
+            let mut resp = result.map_err(transport)?;
             let status = resp.status().as_u16();
             if status == 401 && attempt == 0 {
                 self.access = None;
@@ -773,6 +945,32 @@ fn track_row(t: &Value) -> Option<(String, LibraryItem)> {
     Some((uri, item))
 }
 
+/// What a listing says about a track, for the offline store.
+fn track_record(t: &Value) -> Option<TrackRecord> {
+    if t["is_local"].as_bool().unwrap_or(false) || t["type"].as_str() == Some("episode") {
+        return None;
+    }
+    let id = t["id"].as_str()?.to_string();
+    let art_url = t["album"]["images"]
+        .as_array()
+        .and_then(|imgs| imgs.iter().max_by_key(|i| i["width"].as_u64().unwrap_or(0)))
+        .and_then(|i| i["url"].as_str())
+        .map(str::to_string);
+    Some(TrackRecord {
+        uri: t["uri"]
+            .as_str()
+            .map_or_else(|| format!("spotify:track:{id}"), str::to_string),
+        id,
+        title: t["name"].as_str().unwrap_or("Untitled").to_string(),
+        artist: artists(t),
+        album: t["album"]["name"].as_str().map(str::to_string),
+        duration_secs: t["duration_ms"].as_f64().map(|ms| ms / 1000.0),
+        isrc: t["external_ids"]["isrc"].as_str().map(str::to_string),
+        art_url,
+        ..Default::default()
+    })
+}
+
 /// Playlist entries carry the track under `item` (since February 2026) or
 /// `track` (before); either may also be a placeholder.
 fn playlist_entry_track(e: &Value) -> &Value {
@@ -868,7 +1066,9 @@ impl Backend for Spotify {
     }
 
     fn auth(&self) -> Auth {
-        if self.login.is_some() {
+        if self.always_offline {
+            Auth::Ready
+        } else if self.login.is_some() {
             Auth::LoggingIn
         } else if self.refresh.is_none() && self.access.is_none() {
             Auth::NeedsLogin
@@ -878,6 +1078,102 @@ impl Backend for Spotify {
     }
 
     fn browse(&mut self, path: &LibraryPath) -> Result<Vec<LibraryItem>, SourceError> {
+        if self.is_offline() {
+            return self.saved(path);
+        }
+        match self.browse_web(path) {
+            Ok(items) => {
+                if let Some(store) = &self.offline_store {
+                    store.save_listing(path, &items);
+                }
+                Ok(items)
+            }
+            Err(e @ SourceError::Offline(_)) => {
+                self.note(e);
+                self.saved(path)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn background(&mut self) {
+        self.save_step();
+    }
+
+    fn poll(&mut self) -> Result<Option<NowPlaying>, SourceError> {
+        if self.is_offline() {
+            return self.poll_app();
+        }
+        match self.poll_web() {
+            Err(e @ SourceError::Offline(_)) => {
+                self.note(e);
+                self.poll_app()
+            }
+            Ok(Some(mut now)) => {
+                if let Some(store) = &self.offline_store {
+                    store.upsert([TrackRecord {
+                        id: now.track_id.clone(),
+                        uri: format!("spotify:track:{}", now.track_id),
+                        title: now.title.clone(),
+                        artist: now.artist.clone(),
+                        album: now.album.clone(),
+                        duration_secs: now.duration_secs,
+                        isrc: now.isrc.clone(),
+                        art_url: match &now.art {
+                            ArtRef::Url(u) => Some(u.clone()),
+                            _ => None,
+                        },
+                        genre: now.genre.clone(),
+                        genre_checked: now.genre.is_some(),
+                        ..Default::default()
+                    }]);
+                    store.flush();
+                    // The same bytes as online, so the same motion.
+                    if let Some(file) = store.cover_path(&now.track_id) {
+                        now.art = ArtRef::File(file);
+                    }
+                    if let Some(r) = store.record(&now.track_id) {
+                        now.bpm = r.bpm;
+                        if now.genre.is_none() {
+                            now.genre = r.genre;
+                        }
+                    }
+                }
+                Ok(Some(now))
+            }
+            other => other,
+        }
+    }
+
+    fn command(&mut self, c: &Command) -> Result<(), SourceError> {
+        match c {
+            Command::OfflineMode(on) => {
+                self.always_offline = *on;
+                self.offline_until = None;
+                return Ok(());
+            }
+            Command::SaveAhead(s) => {
+                self.save_ahead = *s;
+                return Ok(());
+            }
+            Command::Login | Command::Logout => return self.command_web(c),
+            _ => {}
+        }
+        if self.is_offline() {
+            return spotify_app::command(c);
+        }
+        match self.command_web(c) {
+            Err(e @ SourceError::Offline(_)) => {
+                self.note(e);
+                spotify_app::command(c)
+            }
+            other => other,
+        }
+    }
+}
+
+impl Spotify {
+    fn browse_web(&mut self, path: &LibraryPath) -> Result<Vec<LibraryItem>, SourceError> {
         self.finish_login()?;
         let open = |title: &str, sub: &str, to: LibraryPath| LibraryItem {
             title: title.into(),
@@ -899,13 +1195,45 @@ impl Backend for Spotify {
                     LibraryPath::Playlists,
                 ),
                 open("Albums", "albums you have saved", LibraryPath::Albums),
+                open(
+                    "Devices",
+                    "choose where Spotify plays",
+                    LibraryPath::Devices,
+                ),
             ]),
-            LibraryPath::LikedSongs => {
-                let tracks: Vec<(String, LibraryItem)> = self
-                    .get_all("/me/tracks")?
+            LibraryPath::Devices => {
+                let v = self.get_json("/me/player/devices")?;
+                let devices = v["devices"].as_array().cloned().unwrap_or_default();
+                Ok(devices
                     .iter()
-                    .filter_map(|e| track_row(&e["track"]))
+                    .filter(|d| !d["is_restricted"].as_bool().unwrap_or(false))
+                    .filter_map(|d| {
+                        let id = d["id"].as_str()?.to_string();
+                        let name = d["name"].as_str().unwrap_or("Unknown device").to_string();
+                        let kind = d["type"].as_str().unwrap_or("device").to_lowercase();
+                        let active = d["is_active"].as_bool().unwrap_or(false);
+                        Some(LibraryItem {
+                            title: name.clone(),
+                            subtitle: Some(if active {
+                                format!("{kind}, playing here")
+                            } else {
+                                kind
+                            }),
+                            count: None,
+                            duration_secs: None,
+                            action: ItemAction::Transfer { id, name },
+                        })
+                    })
+                    .collect())
+            }
+            LibraryPath::LikedSongs => {
+                let raw: Vec<Value> = self
+                    .get_all("/me/tracks")?
+                    .into_iter()
+                    .map(|mut e| e["track"].take())
                     .collect();
+                self.remember(&raw);
+                let tracks: Vec<(String, LibraryItem)> = raw.iter().filter_map(track_row).collect();
                 // No context URI exists for liked songs: each row plays the
                 // list from that track on.
                 let uris: Vec<String> = tracks.iter().map(|(u, _)| u.clone()).collect();
@@ -964,11 +1292,13 @@ impl Backend for Spotify {
                     .collect())
             }
             LibraryPath::Playlist { id, uri, .. } => {
-                let tracks = self
+                let raw: Vec<Value> = self
                     .get_all(&format!("/playlists/{}/items", encode(id)))?
                     .iter()
-                    .filter_map(|e| track_row(playlist_entry_track(e)))
+                    .map(|e| playlist_entry_track(e).clone())
                     .collect();
+                self.remember(&raw);
+                let tracks = raw.iter().filter_map(track_row).collect();
                 Ok(context_rows(tracks, uri))
             }
             LibraryPath::Albums => Ok(self
@@ -1000,7 +1330,7 @@ impl Backend for Spotify {
         }
     }
 
-    fn poll(&mut self) -> Result<Option<NowPlaying>, SourceError> {
+    fn poll_web(&mut self) -> Result<Option<NowPlaying>, SourceError> {
         self.finish_login()?;
         if self.login.is_some() {
             return Ok(None);
@@ -1031,7 +1361,7 @@ impl Backend for Spotify {
         }
     }
 
-    fn command(&mut self, c: &Command) -> Result<(), SourceError> {
+    fn command_web(&mut self, c: &Command) -> Result<(), SourceError> {
         match c {
             Command::Login => self.start_login(),
             Command::Logout => {
@@ -1043,8 +1373,10 @@ impl Backend for Spotify {
             }
             Command::PlayPause => self.play_pause(),
             Command::Play(req) => self.play(req),
-            // Handled by the source thread through `browse`.
-            Command::Browse(_) => Ok(()),
+            // Keep playing or paused as it was (`play: false`).
+            Command::Transfer(id) => self.transfer(id, false),
+            // Handled by the source thread through `browse`, and above.
+            Command::Browse(_) | Command::OfflineMode(_) | Command::SaveAhead(_) => Ok(()),
             Command::Next => self.control("POST", "/me/player/next"),
             Command::Previous => self.control("POST", "/me/player/previous"),
             Command::Seek(secs) => self.control(
@@ -1386,6 +1718,45 @@ mod tests {
     }
 
     #[test]
+    fn lists_devices_and_reports_the_playing_one() {
+        let (base, log) = mock_recording(vec![
+            token(),
+            (
+                "GET /v1/me/player/devices",
+                200,
+                r#"{"devices":[
+                  {"id":"mac","name":"MacBook","type":"Computer","is_active":true},
+                  {"id":"tv","name":"TV","type":"TV","is_restricted":true},
+                  {"id":"ph","name":"iPhone","type":"Smartphone","is_active":false}]}"#
+                    .into(),
+            ),
+            ("PUT /v1/me/player", 204, String::new()),
+        ]);
+        let mut sp = spotify(&base, Some("R"));
+        let rows = sp.browse(&LibraryPath::Devices).unwrap();
+        let titles: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            ["MacBook", "iPhone"],
+            "restricted devices are hidden"
+        );
+        assert_eq!(rows[0].subtitle.as_deref(), Some("computer, playing here"));
+        sp.command(&Command::Transfer("ph".into())).unwrap();
+        let calls = log.lock().unwrap();
+        assert!(
+            calls.last().unwrap().1.contains(r#""play":false"#),
+            "{calls:?}"
+        );
+        let state = r#"{"is_playing":false,"progress_ms":0,
+            "device":{"name":"MacBook","volume_percent":30},
+            "item":{"id":"t","name":"Song","artists":[]}}"#;
+        assert_eq!(
+            parse_player(state).unwrap().unwrap().device.as_deref(),
+            Some("MacBook")
+        );
+    }
+
+    #[test]
     fn searches_the_catalogue_for_songs_albums_and_playlists() {
         let (base, log) = mock_recording(vec![
             token(),
@@ -1526,5 +1897,48 @@ mod tests {
         let mut sp = spotify(&base, Some("R"));
         let err = sp.browse(&LibraryPath::LikedSongs).unwrap_err().to_string();
         assert!(err.contains("log in again"), "{err}");
+    }
+
+    #[test]
+    fn unreachable_web_api_falls_back_to_saved_listings() {
+        let dir = std::env::temp_dir().join(format!("cw-spotify-offline-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = OfflineStore::open(dir.clone());
+        let rows = vec![play_all_row(
+            1,
+            PlayRequest {
+                uris: vec!["spotify:track:a".into()],
+                ..Default::default()
+            },
+        )];
+        store.save_listing(&LibraryPath::LikedSongs, &rows);
+        // Nothing listens on port 1: the connection is refused.
+        let mut s = spotify("http://127.0.0.1:1", Some("r")).with_offline(
+            store.clone(),
+            false,
+            SaveAhead::Off,
+        );
+        s.access = Some(("tok".into(), Instant::now() + Duration::from_secs(600)));
+        assert!(!s.is_offline());
+        assert_eq!(s.browse(&LibraryPath::LikedSongs).unwrap(), rows);
+        assert!(s.is_offline(), "follows the app for a while");
+        assert!(matches!(
+            s.browse(&LibraryPath::Playlists),
+            Err(SourceError::Offline(_))
+        ));
+        // Offline search reads the saved tracks.
+        store.upsert([TrackRecord {
+            id: "a".into(),
+            uri: "spotify:track:a".into(),
+            title: "Airbag".into(),
+            ..Default::default()
+        }]);
+        let found = s
+            .browse(&LibraryPath::Search {
+                query: "airbag".into(),
+            })
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -102,6 +102,8 @@ struct PlayerView: View {
             HUD(
                 track: model.nowPlaying,
                 sourceName: model.activeKind?.name ?? "",
+                elsewhere: model.activeKind == .spotify
+                    ? model.spotify.device.flatMap { $0.isPhone ? nil : $0.name } : nil,
                 status: status ?? modelStatus,
                 scrub: scrub,
                 onScrub: barScrub
@@ -170,6 +172,7 @@ struct PlayerView: View {
         if queueOpen || queueDrag != 0 {
             QueuePanel(
                 provider: model.library?.provider,
+                spotify: model.activeKind == .spotify ? model.spotify : nil,
                 onHeaderDrag: { dy, velocity in
                     if let velocity {
                         let close = projected(dy, velocity: velocity) < -h * 0.3
@@ -222,6 +225,20 @@ struct PlayerView: View {
 
         case .twoFingerTap:
             showSettings = true
+
+        case .twoFingerSwipe:
+            model.settings.showLyrics.toggle()
+            Haptics.commit()
+            if !model.settings.showLyrics {
+                flash("cover")
+            } else {
+                switch model.lyricsStatus {
+                case .found?: flash("lyrics")
+                case .searching?: flash("looking up lyrics")
+                case .instrumental?: flash("instrumental, no lyrics")
+                default: flash("no lyrics found for this song")
+                }
+            }
 
         case .panChanged(let t):
             if axis == nil { axis = abs(t.width) > abs(t.height) ? .horizontal : .vertical }
@@ -430,17 +447,23 @@ private struct ConnectScreen: View {
                 ForEach(SourceKind.allCases) { kind in
                     let source = model.source(kind)
                     let busy = model.activeKind == kind && source.status == .connecting
-                    let disabled = kind == .spotify && !model.spotify.isConfigured
+                    let disabled = kind != .appleMusic && !model.spotify.isConfigured
                     Button {
                         model.choose(kind)
                     } label: {
-                        HStack {
-                            Text("> \(kind.name.lowercased())")
-                                .font(Term.font(17, .medium))
-                                .foregroundStyle(disabled ? Term.faint : Term.ink)
+                        HStack(alignment: .firstTextBaseline) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("> \(kind.name.lowercased())")
+                                    .font(Term.font(17, .medium))
+                                    .foregroundStyle(disabled ? Term.faint : Term.ink)
+                                Text("  " + kind.blurb)
+                                    .font(Term.font(12))
+                                    .foregroundStyle(Term.dim)
+                            }
                             Spacer()
                             if busy {
-                                Text("connecting...").font(Term.font(12)).foregroundStyle(.tint)
+                                Text(kind == .offline ? "waiting for spotify..." : "connecting...")
+                                    .font(Term.font(12)).foregroundStyle(.tint)
                             }
                         }
                         .frame(minHeight: 52)

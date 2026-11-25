@@ -9,6 +9,7 @@
 //! M5.
 
 pub mod art;
+pub mod lyrics;
 pub mod scene;
 pub use art::{ArtParams, DEFAULT_CELL_ASPECT, RAMP, Rect, art_rect, base_art, fit_cells};
 pub use scene::{Input, Output, Scene, limit_changes, prepare, render};

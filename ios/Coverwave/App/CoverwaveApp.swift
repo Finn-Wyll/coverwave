@@ -9,8 +9,9 @@ struct CoverwaveApp: App {
             PlayerView()
                 .environment(model)
                 .preferredColorScheme(.dark)
-                .onOpenURL { model.handleOpenURL($0) }
                 .task { await model.start() }
+                // Spotify's return from authorizing in its app (offline).
+                .onOpenURL { url in _ = model.spotify.handle(url: url) }
         }
     }
 }

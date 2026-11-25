@@ -1,7 +1,6 @@
 import Foundation
 import MediaPlayer
 import MusicKit
-import StoreKit
 
 /// The Music library on this iPhone, through MusicKit. Library requests need
 /// only the user's permission (no MusicKit developer service), so this works
@@ -176,25 +175,9 @@ final class AppleMusicLibrary: LibraryProvider {
         let results: [ITunesResult]
     }
 
-    private var storefront: String?
-
-    /// The user's Apple Music country, so store IDs play in their region.
-    private func country() async -> String {
-        if let storefront { return storefront }
-        let code = await withCheckedContinuation { (c: CheckedContinuation<String?, Never>) in
-            SKCloudServiceController().requestStorefrontCountryCode { code, _ in c.resume(returning: code) }
-        }
-        // The storefront code is a 2-letter region (or 3-letter on some
-        // systems); fall back to the device region.
-        let found = code.map { String($0.prefix(2)).lowercased() }
-            ?? Locale.current.region?.identifier.lowercased() ?? "us"
-        storefront = found
-        return found
-    }
-
     private func itunes(_ path: String, _ query: [URLQueryItem]) async throws -> [ITunesResult] {
         var c = URLComponents(string: "https://itunes.apple.com/\(path)")!
-        c.queryItems = query + [URLQueryItem(name: "country", value: await country())]
+        c.queryItems = query + [URLQueryItem(name: "country", value: await Storefront.country())]
         guard let url = c.url else { return [] }
         let (data, response) = try await URLSession.shared.data(from: url)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {

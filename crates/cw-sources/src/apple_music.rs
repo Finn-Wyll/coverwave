@@ -75,6 +75,7 @@ pub fn parse_state(out: &str) -> Result<Option<NowPlaying>, SourceError> {
         genre: f.get(8).and_then(|g| text(g)),
         isrc: None,
         bpm: None,
+        device: None,
     }))
 }
 
@@ -162,7 +163,14 @@ impl Backend for AppleMusic {
                 "tell application \"Music\" to set sound volume to {}",
                 v.min(&100)
             ),
-            Command::Login | Command::Logout | Command::Browse(_) => return Ok(()),
+            Command::Login
+            | Command::Logout
+            | Command::Browse(_)
+            | Command::Transfer(_)
+            | Command::OfflineMode(_)
+            | Command::SaveAhead(_) => {
+                return Ok(());
+            }
             Command::Play(_) => {
                 return Err(SourceError::Unavailable(
                     "pick music in the Music app itself".into(),

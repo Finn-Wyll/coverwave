@@ -4,6 +4,7 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @State private var confirmDelete = false
 
     var body: some View {
         @Bindable var settings = model.settings
@@ -22,6 +23,27 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("Gestures")
+                }
+
+                Section {
+                    Toggle("Show Lyrics", isOn: $settings.showLyrics)
+                    Picker("Style", selection: $settings.lyricStyle) {
+                        ForEach(LyricStyleKind.allCases) { Text($0.label).tag($0) }
+                    }
+                    Picker("Scroll", selection: $settings.lyricScroll) {
+                        ForEach(LyricScrollKind.allCases) { Text($0.label).tag($0) }
+                    }
+                    Picker("Lyric Size", selection: $settings.lyricSize) {
+                        ForEach(LyricSizeKind.allCases) { Text($0.label).tag($0) }
+                    }
+                    Picker("Colours", selection: $settings.lyricPaint) {
+                        Text("Accent").tag(LyricPaintKind.accent)
+                        Text("Cover").tag(LyricPaintKind.cover)
+                    }
+                } header: {
+                    Text("Lyrics")
+                } footer: {
+                    Text("Swipe sideways with two fingers to switch between the cover and its lyrics, which take the cover's place with its motion still running. Lyric Size sets how big the sung line is; Detail makes its letters finer without changing their size. Cover colours fill each letter with the cover beneath it, like a window. Lyrics come from LRCLIB (lrclib.net), which is sent the song's title, artist and album.")
                 }
 
                 Section {
@@ -67,6 +89,8 @@ struct SettingsView: View {
                     )
                 }
 
+                offlineSection
+
                 Section {
                     ForEach(SourceKind.allCases) { kind in
                         Button {
@@ -74,7 +98,7 @@ struct SettingsView: View {
                         } label: {
                             sourceRow(kind)
                         }
-                        .disabled(kind == .spotify && !model.spotify.isConfigured)
+                        .disabled(kind != .appleMusic && !model.spotify.isConfigured)
                     }
                     if model.spotify.isConfigured, model.spotify.status != .disconnected {
                         Button("Log Out of Spotify", role: .destructive) { model.spotify.logOut() }
@@ -97,6 +121,59 @@ struct SettingsView: View {
         }
         .fontDesign(.monospaced)
         .tint(model.accent)
+    }
+
+    @ViewBuilder private var offlineSection: some View {
+        @Bindable var settings = model.settings
+        let saver = model.saver
+        Section {
+            Picker("Save Ahead", selection: $settings.saveAhead) {
+                ForEach(OfflineSaver.Scope.allCases) { Text($0.label).tag($0) }
+            }
+            .onChange(of: settings.saveAhead) { _, scope in
+                if scope == .off { saver.stop() } else { saver.kick(force: true) }
+            }
+            LabeledContent("Spotify App") {
+                Text(
+                    model.spotify.preparedAt.map {
+                        "Ready, authorised " + $0.formatted(.relative(presentation: .named))
+                    } ?? "Not prepared yet")
+            }
+            Button(model.spotify.preparedAt == nil ? "Prepare for Offline" : "Prepare Again") {
+                model.spotify.prepareOffline()
+            }
+            .disabled(!NetworkMonitor.shared.isOnline || !model.spotify.isConfigured)
+            Toggle("Use Mobile Data", isOn: $settings.saveOnMobileData)
+                .onChange(of: settings.saveOnMobileData) { saver.kick() }
+            LabeledContent("Saved") {
+                Text(
+                    "\(saver.ready) of \(saver.known) songs · "
+                        + ByteCountFormatter.string(fromByteCount: saver.diskBytes, countStyle: .file))
+            }
+            if let activity = saver.activity {
+                Text(activity).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Button("Save Now") { saver.kick(force: true) }
+                .disabled(settings.saveAhead == .off || saver.activity != nil || model.isOfflineMode)
+            if model.spotify.needsOfflineLogin {
+                Button("Log In Again for Offline") { model.spotify.reauthorize() }
+            }
+            Button("Delete Saved Data", role: .destructive) { confirmDelete = true }
+                .confirmationDialog(
+                    "Delete what was saved for offline?", isPresented: $confirmDelete, titleVisibility: .visible
+                ) {
+                    Button("Delete", role: .destructive) { saver.deleteAll() }
+                } message: {
+                    Text("Covers, genres, lyrics, rhythm maps and library listings. Spotify's downloads are not touched.")
+                }
+        } header: {
+            Text("Offline")
+        } footer: {
+            Text(
+                "Prepare for Offline once while online: it opens Spotify to authorise coverwave and comes back, and coverwave keeps that login (renewing it quietly whenever Spotify is open while you are online). Then pick Offline on the start screen (or in Sources) to listen with no internet: coverwave follows the Spotify app on this iPhone, which plays the songs you downloaded in Spotify, and uses what it saved here. Spotify must be open. While online, Save Ahead keeps each song's cover, genre, lyrics and rhythm, and your library's listings. If the internet drops while following Spotify, coverwave switches to the Spotify app by itself. The songs themselves stay in Spotify."
+            )
+        }
+        .onAppear { saver.refreshCounts() }
     }
 
     @ViewBuilder private var modelRow: some View {

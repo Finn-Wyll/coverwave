@@ -1584,6 +1584,25 @@ fn lightning(
             };
             let cell = grid.cells()[i];
             set(scene, grid, owner, i, Cell { ch, fg, ..cell }, id);
+            // The bolt lights what is next to it, fading with distance:
+            // local light, not a screen flash.
+            for dx in -3i32..=3 {
+                let nx = x + dx;
+                if dx == 0 || nx < art.x as i32 || nx >= (art.x + art.w) as i32 {
+                    continue;
+                }
+                let j = y as usize * w + nx as usize;
+                let near = grid.cells()[j];
+                let k = 0.5 * flash * (1.0 - dx.unsigned_abs() as f32 / 4.0);
+                let lit = Cell {
+                    ch: near.ch,
+                    fg: near.fg.lerp(scene.light, k),
+                    bg: near.bg.map(|b| b.lerp(scene.light, 0.5 * k)),
+                };
+                if lit != near {
+                    set(scene, grid, owner, j, lit, id);
+                }
+            }
         }
     };
     let x0 = art.x as i32 + (hb >> 8) as i32 % art.w as i32;

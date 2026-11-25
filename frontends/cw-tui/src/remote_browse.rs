@@ -18,6 +18,11 @@ pub enum RemoteAction {
     None,
     Browse(LibraryPath),
     Play(PlayRequest),
+    /// Move playback to a device (`id`, display name).
+    Transfer {
+        id: String,
+        name: String,
+    },
 }
 
 struct Level {
@@ -173,6 +178,10 @@ impl RemoteBrowser {
             ItemAction::Open(path) => {
                 self.filter = None;
                 self.error = None;
+                // Devices come and go: always list them fresh.
+                if path == LibraryPath::Devices {
+                    self.cache.retain(|(p, _, _)| *p != path);
+                }
                 self.stack.push(Level {
                     path: path.clone(),
                     cursor: 0,
@@ -184,6 +193,11 @@ impl RemoteBrowser {
                 }
             }
             ItemAction::Play(req) => RemoteAction::Play(req),
+            ItemAction::Transfer { id, name } => {
+                // The list changes once playback moves.
+                self.refresh();
+                RemoteAction::Transfer { id, name }
+            }
         }
     }
 
@@ -354,6 +368,35 @@ mod tests {
         // An empty search does nothing.
         b.start_filter();
         assert_eq!(b.search(), RemoteAction::None);
+    }
+
+    #[test]
+    fn devices_list_fresh_and_enter_moves_playback() {
+        let mut b = RemoteBrowser::new();
+        let devices = item("Devices", ItemAction::Open(LibraryPath::Devices));
+        arrive(&mut b, LibraryPath::Root, vec![devices]);
+        assert_eq!(b.enter(), RemoteAction::Browse(LibraryPath::Devices));
+        let phone = ItemAction::Transfer {
+            id: "p1".into(),
+            name: "iPhone".into(),
+        };
+        arrive(&mut b, LibraryPath::Devices, vec![item("iPhone", phone)]);
+        assert_eq!(
+            b.enter(),
+            RemoteAction::Transfer {
+                id: "p1".into(),
+                name: "iPhone".into()
+            }
+        );
+        assert_eq!(
+            b.wanted(),
+            Some(LibraryPath::Devices),
+            "refetched after moving"
+        );
+        // Going back and in again refetches too.
+        arrive(&mut b, LibraryPath::Devices, vec![]);
+        assert!(b.back());
+        assert_eq!(b.enter(), RemoteAction::Browse(LibraryPath::Devices));
     }
 
     #[test]

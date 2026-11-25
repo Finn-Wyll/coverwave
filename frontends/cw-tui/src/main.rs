@@ -6,10 +6,13 @@ mod app;
 mod browse;
 mod config;
 mod cover;
+mod lyrics_store;
 mod models;
+mod offline_saver;
 mod paths;
 mod recipes;
 mod remote_browse;
+mod settings_menu;
 mod sources;
 mod term;
 mod ui;
@@ -65,6 +68,35 @@ fn settings_from(config: &config::Config, warnings: &mut Vec<String>) -> Setting
     s.offline = config.offline;
     s.motion = config.motion;
     s.fps = config.fps.clamp(10, 120);
+    match cw_render::lyrics::LyricStyle::from_name(&config.lyrics.style) {
+        Some(v) => s.lyric_style = v,
+        None => warnings.push(format!(
+            "config: unknown lyrics style {:?}",
+            config.lyrics.style
+        )),
+    }
+    match cw_render::lyrics::LyricScroll::from_name(&config.lyrics.scroll) {
+        Some(v) => s.lyric_scroll = v,
+        None => warnings.push(format!(
+            "config: unknown lyrics scroll {:?}",
+            config.lyrics.scroll
+        )),
+    }
+    match cw_render::lyrics::LyricSize::from_name(&config.lyrics.size) {
+        Some(v) => s.lyric_size = v,
+        None => warnings.push(format!(
+            "config: unknown lyrics size {:?}",
+            config.lyrics.size
+        )),
+    }
+    match cw_render::lyrics::LyricPaint::from_name(&config.lyrics.colors) {
+        Some(v) => s.lyric_paint = v,
+        None => warnings.push(format!(
+            "config: unknown lyrics colors {:?}",
+            config.lyrics.colors
+        )),
+    }
+    s.lyrics_online = config.lyrics.online_lookup;
     s
 }
 
@@ -235,6 +267,8 @@ fn main() -> Result<()> {
     // `ratatui::init` enters the alternate screen + raw mode and installs a
     // panic hook that restores the terminal before the panic message prints.
     let mut terminal = ratatui::init();
+    // A smaller font in Ghostty for finer art; reset when this drops.
+    let font_zoom = term::FontZoom::start(config.font_size);
     // Native code (CoreAudio and friends) may print to stderr, which would
     // scribble over the UI; send it to a log while the UI is up.
     let stderr_log = paths::dir(paths::Kind::Cache)
@@ -256,11 +290,14 @@ fn main() -> Result<()> {
         app.say(warnings.join("; "));
     }
     app.measure_cell_aspect();
+    app.config_path = config_path.clone();
+    app.font_size = config.font_size;
     app.stderr_log = stderr_log.as_ref().map(|g| g.path.clone());
     let result = run(&mut terminal, &mut app);
     app.tick(); // a final snapshot for the saved queue
     app.save_queue();
     ratatui::restore();
+    drop(font_zoom);
     drop(stderr_log); // stderr back on the terminal for any error below
     result
 }

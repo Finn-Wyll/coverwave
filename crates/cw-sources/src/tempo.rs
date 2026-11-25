@@ -93,6 +93,33 @@ pub fn lookup(now: &NowPlaying) -> Option<f32> {
     (est.confidence >= MIN_CONFIDENCE).then_some(est.bpm)
 }
 
+/// The genres of the track's album on Deezer ("Rock, Alternative"), for
+/// tracks whose source gave none (blocking).
+pub fn album_genre(now: &NowPlaying) -> Option<String> {
+    let track: serde_json::Value = serde_json::from_str(&find(now)?).ok()?;
+    let id = track["album"]["id"].as_u64()?;
+    let album: serde_json::Value =
+        serde_json::from_str(&get(&format!("{API}/album/{id}"))?).ok()?;
+    let names: Vec<&str> = album["genres"]["data"]
+        .as_array()?
+        .iter()
+        .filter_map(|g| g["name"].as_str())
+        .filter(|n| !n.is_empty())
+        .collect();
+    (!names.is_empty()).then(|| names.join(", "))
+}
+
+/// Whether the internet answers (Deezer's API, a few seconds at most).
+pub fn online() -> bool {
+    agent()
+        .get(&format!("{API}/infos"))
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(4)))
+        .build()
+        .call()
+        .is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

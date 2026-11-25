@@ -311,6 +311,13 @@ struct AnimState {
 pub struct Animator {
     state: Mutex<AnimState>,
     loop_frames: u32,
+    /// The cover's colours for lyrics.
+    lyric_colors: cw_render::lyrics::LyricColors,
+    /// The cover's square on the grid, where lyrics go.
+    art: cw_render::Rect,
+    cell_aspect: f32,
+    recipe: Recipe,
+    ramp: &'static [char],
 }
 
 #[uniffi::export]
@@ -344,13 +351,31 @@ impl Animator {
         let art =
             cw_render::art_rect(image.width, image.height, cols, rows, aspect).unwrap_or_default();
         let scene = cw_render::prepare(recipe, base.clone(), art, ramp);
+        let palette = &cover.cover.palette;
+        // The lightest palette colour, eased toward plain text so it reads.
+        let light = palette
+            .colors
+            .iter()
+            .max_by_key(|c| c.0 as u32 + c.1 as u32 + c.2 as u32)
+            .copied()
+            .unwrap_or(Rgb(196, 204, 214));
+        let lyric_colors = cw_render::lyrics::LyricColors {
+            accent: palette.accent,
+            text: light.lerp(Rgb(222, 226, 232), 0.5),
+            background: background.into(),
+        };
         Arc::new(Animator {
+            lyric_colors,
             state: Mutex::new(AnimState {
                 scene,
                 base,
                 prev: None,
                 first_frame: None,
             }),
+            art,
+            cell_aspect: aspect,
+            recipe: recipe.clone(),
+            ramp,
             loop_frames: recipe.global.loop_frames,
         })
     }
@@ -364,31 +389,188 @@ impl Animator {
     /// second after the animator's first frame, and never changes more cells
     /// per frame than the recipe's budget.
     pub fn frame(&self, frame: u32, audio: AudioLevels) -> CellFrame {
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let start = *s.first_frame.get_or_insert(frame);
-        let fade = (frame.wrapping_sub(start) as f32 / FADE_FRAMES as f32).min(1.0);
+        CellFrame::from(&self.render(frame, &AudioFrame::from(&audio)))
+    }
+
+    /// Lyrics in place of the cover: a square the cover's size, centred
+    /// where it was, at `position` seconds into the track. The cover's
+    /// motion keeps running behind and around the words.
+    #[allow(clippy::too_many_arguments)]
+    pub fn frame_with_lyrics(
+        &self,
+        frame: u32,
+        audio: AudioLevels,
+        lyrics: Arc<LyricSheet>,
+        position: f64,
+        duration: Option<f64>,
+        style: LyricStyleKind,
+        scroll: LyricScrollKind,
+        size: LyricSizeKind,
+        paint: LyricPaintKind,
+        animate: bool,
+    ) -> CellFrame {
         let audio = AudioFrame::from(&audio);
+        let cover_base = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .base
+            .clone();
+        let view = cw_render::lyrics::LyricView {
+            style: style.into(),
+            scroll: scroll.into(),
+            size: size.into(),
+            paint: paint.into(),
+        };
+        // The words drawn into the cover's square, then the cover's own
+        // recipe run over them: every effect acts on the letters.
+        let base = cw_render::lyrics::lyric_base(
+            &cover_base,
+            self.art,
+            self.cell_aspect,
+            &lyrics.lyrics,
+            position,
+            duration,
+            view,
+            self.lyric_colors,
+            &audio,
+        );
+        if !animate {
+            return CellFrame::from(&base);
+        }
+        let scene = cw_render::lyrics::lyric_scene(&self.recipe, base, self.art, self.ramp);
         let out = cw_render::render(
-            &s.scene,
+            &scene,
             cw_render::Input {
                 frame,
                 audio: &audio,
-                fade,
+                fade: 1.0,
             },
         );
-        let out = match s.prev.take() {
-            Some(prev) => cw_render::limit_changes(&s.scene, &prev, out),
-            None => out,
-        };
-        let result = CellFrame::from(&out.grid);
-        s.prev = Some(out);
-        result
+        CellFrame::from(&out.grid)
     }
 
     /// Frames in one seamless loop of this cover's motion.
     pub fn loop_frames(&self) -> u32 {
         self.loop_frames
     }
+}
+
+impl Animator {
+    /// The cover's frame `frame`, with the fade-in and change budget.
+    fn render(&self, frame: u32, audio: &AudioFrame) -> CellGrid {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let start = *s.first_frame.get_or_insert(frame);
+        let fade = (frame.wrapping_sub(start) as f32 / FADE_FRAMES as f32).min(1.0);
+        let out = cw_render::render(&s.scene, cw_render::Input { frame, audio, fade });
+        let out = match s.prev.take() {
+            Some(prev) => cw_render::limit_changes(&s.scene, &prev, out),
+            None => out,
+        };
+        let grid = out.grid.clone();
+        s.prev = Some(out);
+        grid
+    }
+}
+
+// MARK: Lyrics
+
+/// How lyric lines look (see `cw_render::lyrics::LyricStyle`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, uniffi::Enum)]
+pub enum LyricStyleKind {
+    /// The sung line in big letters, the others as text.
+    #[default]
+    BigCurrent,
+    Text,
+    BigOnly,
+}
+
+impl From<LyricStyleKind> for cw_render::lyrics::LyricStyle {
+    fn from(k: LyricStyleKind) -> Self {
+        match k {
+            LyricStyleKind::BigCurrent => Self::BigCurrent,
+            LyricStyleKind::Text => Self::Text,
+            LyricStyleKind::BigOnly => Self::BigOnly,
+        }
+    }
+}
+
+/// How tall the large lyric letters are (a share of the square, the same
+/// at every detail level).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, uniffi::Enum)]
+pub enum LyricSizeKind {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+impl From<LyricSizeKind> for cw_render::lyrics::LyricSize {
+    fn from(k: LyricSizeKind) -> Self {
+        match k {
+            LyricSizeKind::Small => Self::Small,
+            LyricSizeKind::Medium => Self::Medium,
+            LyricSizeKind::Large => Self::Large,
+        }
+    }
+}
+
+/// Where lyric colours come from: the accent, or the cover itself (the
+/// letters as windows onto the art).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, uniffi::Enum)]
+pub enum LyricPaintKind {
+    #[default]
+    Accent,
+    Cover,
+}
+
+impl From<LyricPaintKind> for cw_render::lyrics::LyricPaint {
+    fn from(k: LyricPaintKind) -> Self {
+        match k {
+            LyricPaintKind::Accent => Self::Accent,
+            LyricPaintKind::Cover => Self::Cover,
+        }
+    }
+}
+
+/// Which way lyric lines move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, uniffi::Enum)]
+pub enum LyricScrollKind {
+    #[default]
+    Up,
+    Down,
+}
+
+impl From<LyricScrollKind> for cw_render::lyrics::LyricScroll {
+    fn from(k: LyricScrollKind) -> Self {
+        match k {
+            LyricScrollKind::Up => Self::Up,
+            LyricScrollKind::Down => Self::Down,
+        }
+    }
+}
+
+/// A song's lyrics, parsed from LRC (synced) or plain text.
+#[derive(uniffi::Object)]
+pub struct LyricSheet {
+    lyrics: cw_core::lyrics::Lyrics,
+}
+
+#[uniffi::export]
+impl LyricSheet {
+    pub fn is_synced(&self) -> bool {
+        self.lyrics.synced
+    }
+
+    pub fn line_count(&self) -> u32 {
+        self.lyrics.lines.len() as u32
+    }
+}
+
+/// Parses LRC or plain lyrics text; `None` if it holds no lines.
+#[uniffi::export]
+pub fn parse_lyrics(text: String) -> Option<Arc<LyricSheet>> {
+    cw_core::lyrics::parse_lrc(&text, "lrclib").map(|lyrics| Arc::new(LyricSheet { lyrics }))
 }
 
 /// The idle scene (drifting particles behind a wordmark) for when nothing
@@ -581,6 +763,59 @@ mod tests {
             assert_eq!(fa.fg.len(), 60 * 30);
         }
         assert_eq!(anim_a.still().cols, 60);
+    }
+
+    #[test]
+    fn lyrics_draw_over_the_moving_cover() {
+        let engine = CoverEngine::new();
+        let cover = engine.analyse(cover_png(), None, None).unwrap();
+        let bg = CoverColor { r: 0, g: 0, b: 0 };
+        let anim = Animator::new(cover, 60, 30, 0.6, ArtMode::Palette, bg);
+        let sheet = parse_lyrics("[00:01.00]hello there\n[00:04.00]second".into()).unwrap();
+        assert!(sheet.is_synced() && sheet.line_count() == 2);
+        assert!(parse_lyrics("  \n".into()).is_none());
+        let lv = beat_levels(120.0, None, 2.0, true);
+        let plain = anim.frame(5, lv.clone());
+        let with = anim.frame_with_lyrics(
+            6,
+            lv.clone(),
+            sheet.clone(),
+            2.0,
+            Some(30.0),
+            LyricStyleKind::Text,
+            LyricScrollKind::Up,
+            LyricSizeKind::Medium,
+            LyricPaintKind::Accent,
+            true,
+        );
+        assert_ne!(plain.glyphs, with.glyphs);
+        // Motion off: exactly the words (the effects, when on, act on them).
+        let still = anim.frame_with_lyrics(
+            7,
+            lv.clone(),
+            sheet.clone(),
+            2.0,
+            None,
+            LyricStyleKind::Text,
+            LyricScrollKind::Up,
+            LyricSizeKind::Medium,
+            LyricPaintKind::Accent,
+            false,
+        );
+        assert!(still.glyphs.contains("hello there"));
+        let window = anim.frame_with_lyrics(
+            8,
+            lv,
+            sheet,
+            2.0,
+            None,
+            LyricStyleKind::BigOnly,
+            LyricScrollKind::Down,
+            LyricSizeKind::Large,
+            LyricPaintKind::Cover,
+            false,
+        );
+        assert_eq!(window.cols, 60);
     }
 
     #[test]

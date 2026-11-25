@@ -13,12 +13,18 @@
 # Release > Run workflow). Pushes only build while the repo is PUBLIC, where
 # Actions minutes are free; on a private repo only manual runs build (they
 # use the account's minutes, macOS counting 10x).
+#
+# Pushing a version tag (`git tag v0.2.0 && git push origin v0.2.0`) also
+# publishes a proper release named after it, with the same files, marked as
+# the latest release. Every release gets download notes, labelled files and
+# SHA256SUMS.txt.
 name: Release
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
+    tags: ["v*"]
     paths-ignore:
       - "**.md"
 
@@ -119,11 +125,14 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          mkdir -p out
+          mkdir -p out pkg
+          cp LICENSE pkg/
           if [ "$RUNNER_OS" = Windows ]; then
-            7z a -bso0 "out/coverwave-${{ matrix.name }}.zip" ./target/release/coverwave.exe
+            cp target/release/coverwave.exe pkg/
+            (cd pkg && 7z a -bso0 "../out/coverwave-${{ matrix.name }}.zip" .)
           else
-            tar -czf "out/coverwave-${{ matrix.name }}.tar.gz" -C target/release coverwave
+            cp target/release/coverwave pkg/
+            tar -czf "out/coverwave-${{ matrix.name }}.tar.gz" -C pkg .
           fi
       - uses: actions/upload-artifact@v4
         with:
@@ -138,18 +147,85 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      - name: Publish the latest-build pre-release
+      - name: Checksums and notes
+        run: |
+          sha="${GITHUB_SHA::7}"
+          printf 'commit %s\nbuilt %s\n' "$GITHUB_SHA" "$(date -u +%Y-%m-%dT%H:%MZ)" > dist/build-info.txt
+          (cd dist && sha256sum * > SHA256SUMS.txt)
+          size() { du -h "dist/$1" | cut -f1; }
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
+          {
+            if [ "$RELEASE_TAG" = latest-build ]; then
+              echo "The newest build of \`main\` (commit [\`$sha\`](https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA})), rebuilt on every push. For a fixed version, pick a \`v\` release."
+            else
+              echo "coverwave ${RELEASE_TAG}, built from commit [\`$sha\`](https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA})."
+            fi
+            echo
+            echo "### Terminal app"
+            echo
+            echo "| System | Download | Size |"
+            echo "|---|---|---|"
+            echo "| macOS, Apple silicon | [coverwave-macos-arm64.tar.gz]($base/coverwave-macos-arm64.tar.gz) | $(size coverwave-macos-arm64.tar.gz) |"
+            echo "| Linux, x86-64 | [coverwave-linux-x64.tar.gz]($base/coverwave-linux-x64.tar.gz) | $(size coverwave-linux-x64.tar.gz) |"
+            echo "| Windows, x86-64 | [coverwave-windows-x64.zip]($base/coverwave-windows-x64.zip) | $(size coverwave-windows-x64.zip) |"
+            echo
+            echo "macOS and Linux:"
+            echo
+            echo '```sh'
+            echo "tar -xzf coverwave-*.tar.gz && ./coverwave ~/Music"
+            echo '```'
+            echo
+            echo "macOS marks downloads as quarantined; if it refuses to open, run \`xattr -d com.apple.quarantine coverwave\` once. The first run downloads the cover-analysis model (45 MB)."
+            echo
+            echo "### For building the iPhone app"
+            echo
+            echo "\`ios/fetch-core.sh\` downloads these, so Xcode only compiles the Swift app:"
+            echo
+            echo "| File | What it is | Size |"
+            echo "|---|---|---|"
+            echo "| CoverwaveCore.xcframework.zip | the shared Rust core for iOS | $(size CoverwaveCore.xcframework.zip) |"
+            echo "| CoverwaveCore.swift | its Swift bindings (UniFFI) | $(size CoverwaveCore.swift) |"
+            echo "| BeatThis-small.onnx | the Beat This! beat tracker, MIT | $(size BeatThis-small.onnx) |"
+            echo
+            echo "### Recent changes"
+            echo
+            git log -10 --pretty='- %s (%h)' "$GITHUB_SHA"
+            echo
+            echo "Check downloads with \`sha256sum -c SHA256SUMS.txt\`."
+          } > notes.md
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'latest-build' }}
+      - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'latest-build' }}
         run: |
-          printf 'commit %s\nbuilt %s\n' "$GITHUB_SHA" "$(date -u +%Y-%m-%dT%H:%MZ)" > dist/build-info.txt
-          gh release delete latest-build --yes --cleanup-tag || true
-          gh release create latest-build dist/* \
-            --prerelease --target "$GITHUB_SHA" \
-            --title "Latest build (${GITHUB_SHA::7})" \
-            --notes "Built from ${GITHUB_SHA} by the Release workflow. ios/fetch-core.sh downloads the iOS core and beat model from here."
+          # Display names on the release page; the file names stay as they
+          # are (ios/fetch-core.sh downloads them by name).
+          files=(
+            "dist/coverwave-macos-arm64.tar.gz#coverwave for macOS (Apple silicon)"
+            "dist/coverwave-linux-x64.tar.gz#coverwave for Linux (x86-64)"
+            "dist/coverwave-windows-x64.zip#coverwave for Windows (x86-64)"
+            "dist/CoverwaveCore.xcframework.zip#iOS core (XCFramework)"
+            "dist/CoverwaveCore.swift#iOS core Swift bindings"
+            "dist/BeatThis-small.onnx#Beat tracker model (ONNX)"
+            "dist/SHA256SUMS.txt#SHA-256 checksums"
+            "dist/build-info.txt#Build info (commit and time)"
+          )
+          if [ "$RELEASE_TAG" = latest-build ]; then
+            gh release delete latest-build --yes --cleanup-tag || true
+            gh release create latest-build "${files[@]}" \
+              --prerelease --latest=false --target "$GITHUB_SHA" \
+              --title "Latest build (${GITHUB_SHA::7})" --notes-file notes.md
+          else
+            gh release create "$RELEASE_TAG" "${files[@]}" \
+              --verify-tag --latest --title "coverwave $RELEASE_TAG" --notes-file notes.md
+          fi

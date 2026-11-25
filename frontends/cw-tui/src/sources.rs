@@ -4,10 +4,14 @@
 //! the cover still reacts to the music.
 
 use crate::config::Config;
+use crate::offline_saver::SaverState;
 use cw_analysis::GenreFamily;
 use cw_capture::{Capture, CaptureError, Target};
 use cw_core::{AudioFrame, BeatClock};
+use cw_sources::offline::{OfflineStore, SaveAhead};
 use cw_sources::{Command, RemoteHandle, RemoteState};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,11 +64,19 @@ pub struct Sources {
     pub state: Option<RemoteState>,
     capture_enabled: bool,
     /// Look up remote tracks' tempo online (Deezer) for the beat clock.
-    tempo_lookup: bool,
+    /// Look tempos up on Deezer (applies to sources started after a change).
+    pub tempo_lookup: bool,
     capture: Option<Running>,
     /// Why capture is not running (shown in the debug overlay).
     pub capture_status: String,
     next_try: Instant,
+    /// Spotify offline mode: follow the Spotify app, never the internet.
+    pub offline_always: bool,
+    pub save_ahead: SaveAhead,
+    /// Look lyrics up while saving ahead.
+    lyrics_online: bool,
+    /// Started with the Spotify source.
+    offline: Option<(OfflineStore, Arc<SaverState>)>,
 }
 
 impl Sources {
@@ -101,7 +113,73 @@ impl Sources {
             capture: None,
             capture_status: String::new(),
             next_try: Instant::now(),
+            offline_always: config.spotify.offline.trim().eq_ignore_ascii_case("always"),
+            save_ahead: SaveAhead::from_name(&config.spotify.save_ahead).unwrap_or_default(),
+            lyrics_online: config.lyrics.online_lookup,
+            offline: None,
         }
+    }
+
+    /// The offline store and saver, started on first use of Spotify.
+    fn offline_parts(&mut self) -> Option<OfflineStore> {
+        if self.offline.is_none() {
+            let dir = crate::paths::dir(crate::paths::Kind::Data)?.join("offline");
+            let store = OfflineStore::open(dir);
+            let state = Arc::new(SaverState::default());
+            state.set_mode(self.save_ahead);
+            state.tempo.store(self.tempo_lookup, Ordering::Relaxed);
+            state.lyrics.store(self.lyrics_online, Ordering::Relaxed);
+            let lyrics_dir = crate::paths::dir(crate::paths::Kind::Cache).map(|d| d.join("lyrics"));
+            crate::offline_saver::spawn(store.clone(), lyrics_dir, state.clone());
+            self.offline = Some((store, state));
+        }
+        self.offline.as_ref().map(|(s, _)| s.clone())
+    }
+
+    fn spotify_handle(&self) -> Option<&RemoteHandle> {
+        self.remotes
+            .iter()
+            .find(|(k, _)| *k == SourceKind::Spotify)
+            .map(|(_, h)| h)
+    }
+
+    /// Turns Spotify's offline mode on or off.
+    pub fn set_offline_always(&mut self, on: bool) {
+        self.offline_always = on;
+        if let Some(h) = self.spotify_handle() {
+            h.send(Command::OfflineMode(on));
+        }
+    }
+
+    pub fn set_save_ahead(&mut self, m: SaveAhead) {
+        self.save_ahead = m;
+        if let Some(h) = self.spotify_handle() {
+            h.send(Command::SaveAhead(m));
+        }
+        if let Some((_, st)) = &self.offline {
+            st.set_mode(m);
+        }
+    }
+
+    pub fn set_lyrics_online(&mut self, on: bool) {
+        self.lyrics_online = on;
+        if let Some((_, st)) = &self.offline {
+            st.lyrics.store(on, Ordering::Relaxed);
+        }
+    }
+
+    /// How much is saved for offline ("812 of 1204 songs ready, 96 MB").
+    pub fn offline_summary(&self) -> String {
+        let Some((store, st)) = &self.offline else {
+            return "starts with the Spotify source".into();
+        };
+        let total = store.track_count();
+        let done = st.done.load(Ordering::Relaxed).min(total);
+        let mb = store.disk_bytes() as f64 / 1e6;
+        if total == 0 {
+            return "nothing yet".into();
+        }
+        format!("{done} of {total} songs ready, {mb:.0} MB")
     }
 
     pub fn is_remote(&self) -> bool {
@@ -109,6 +187,11 @@ impl Sources {
     }
 
     /// Why `S` does nothing, if there is only the local source.
+    /// Every source that can be chosen here, in menu order.
+    pub fn available(&self) -> &[SourceKind] {
+        &self.available
+    }
+
     pub fn hint(&self) -> Option<&'static str> {
         (self.available.len() == 1).then_some(
             "no other sources: set [spotify] client_id in config.toml (Apple Music needs macOS)",
@@ -143,8 +226,12 @@ impl Sources {
                         .spotify_cfg
                         .clone()
                         .expect("Spotify is only offered when configured");
-                    let store = cw_sources::spotify::KeyringStore::new(&cfg.client_id);
-                    Box::new(cw_sources::spotify::Spotify::new(cfg, Box::new(store)))
+                    let keys = cw_sources::spotify::KeyringStore::new(&cfg.client_id);
+                    let mut spotify = cw_sources::spotify::Spotify::new(cfg, Box::new(keys));
+                    if let Some(store) = self.offline_parts() {
+                        spotify = spotify.with_offline(store, self.offline_always, self.save_ahead);
+                    }
+                    Box::new(spotify)
                 }
                 _ => Box::new(cw_sources::apple_music::AppleMusic::new()),
             };

@@ -22,6 +22,7 @@ fn main() {
         genre: None,
         isrc: args.get(2).cloned(),
         bpm: None,
+        device: None,
     };
     match cw_sources::tempo::lookup(&now) {
         Some(bpm) => println!("{} - {}: {bpm:.1} BPM", args[0], args[1]),

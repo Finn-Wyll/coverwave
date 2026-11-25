@@ -86,6 +86,13 @@ pub struct Settings {
     /// Start with cover motion on.
     pub motion: bool,
     pub fps: u32,
+    /// Lyrics view: how lines look and which way they scroll.
+    pub lyric_style: cw_render::lyrics::LyricStyle,
+    pub lyric_scroll: cw_render::lyrics::LyricScroll,
+    pub lyric_size: cw_render::lyrics::LyricSize,
+    pub lyric_paint: cw_render::lyrics::LyricPaint,
+    /// Look lyrics up on LRCLIB.
+    pub lyrics_online: bool,
 }
 
 impl Default for Settings {
@@ -97,6 +104,11 @@ impl Default for Settings {
             offline: false,
             motion: true,
             fps: 30,
+            lyric_style: Default::default(),
+            lyric_scroll: Default::default(),
+            lyric_size: Default::default(),
+            lyric_paint: Default::default(),
+            lyrics_online: true,
         }
     }
 }
@@ -112,6 +124,8 @@ pub struct ArtCache {
     /// The static art (shown with motion off).
     pub base: CellGrid,
     pub scene: cw_render::Scene,
+    /// The cover's square, where lyrics go.
+    pub art: cw_render::Rect,
 }
 
 /// Frames over which a new recipe's motion fades in (1s at 30fps).
@@ -189,11 +203,22 @@ pub struct App {
     pub prompt: Option<String>,
     /// A short message under the HUD (saved playlist, config problems).
     pub status: Option<(String, u32)>,
+    /// The lyrics view replaces the cover (`l`); the cover keeps moving
+    /// behind them.
     pub show_lyrics: bool,
     /// Seconds added to the playback position when timing lyrics.
     pub lyrics_offset: f64,
-    /// Lyrics of the track being heard, loaded when it starts.
-    pub lyrics: Option<(PathBuf, Option<Lyrics>)>,
+    /// Lyrics of whatever is playing, local or remote.
+    pub lyrics: crate::lyrics_store::LyricsStore,
+    pub lyric_view: cw_render::lyrics::LyricView,
+    /// The source picker (`S`): the highlighted row while open.
+    pub source_picker: Option<usize>,
+    /// The settings menu (`,`).
+    pub settings_menu: crate::settings_menu::SettingsMenu,
+    /// Where settings are saved.
+    pub config_path: Option<PathBuf>,
+    /// Ghostty font size while running (0: unchanged).
+    pub font_size: f32,
     /// The track being heard and the furthest point reached, for play counts.
     heard: Option<(PathBuf, f64, Option<f64>)>,
     /// Local, Spotify or Apple Music (`S` cycles).
@@ -214,6 +239,9 @@ pub struct App {
     pub art_cache: Option<ArtCache>,
     /// The last rendered frame, for the change limiter.
     pub prev_out: Option<cw_render::Output>,
+    /// Whether the last frame used the lyric scene (switching resets the
+    /// change limiter).
+    pub lyrics_scene_on: bool,
     /// Motion on (`m` toggles).
     pub motion: bool,
     /// The cover entry whose motion is fading in, and the frame it started.
@@ -267,9 +295,22 @@ impl App {
             dirs: Dirs::default(),
             prompt: None,
             status: None,
-            show_lyrics: true,
+            show_lyrics: false,
             lyrics_offset: 0.0,
-            lyrics: None,
+            lyrics: crate::lyrics_store::LyricsStore::new(
+                crate::paths::dir(crate::paths::Kind::Cache).map(|d| d.join("lyrics")),
+                settings.lyrics_online,
+            ),
+            source_picker: None,
+            settings_menu: Default::default(),
+            config_path: None,
+            font_size: 0.0,
+            lyric_view: cw_render::lyrics::LyricView {
+                style: settings.lyric_style,
+                scroll: settings.lyric_scroll,
+                size: settings.lyric_size,
+                paint: settings.lyric_paint,
+            },
             heard: None,
             sources: Sources::new(&crate::config::Config::default()),
             art_style: settings.art_style,
@@ -284,6 +325,7 @@ impl App {
             model_was_ready: false,
             art_cache: None,
             prev_out: None,
+            lyrics_scene_on: false,
             motion: settings.motion,
             fade_entry: 0,
             fade_start: 0,
@@ -440,15 +482,57 @@ impl App {
             }
             self.heard = current.clone().map(|p| (p, pos, dur));
         }
-        let lyrics_stale = match (&self.lyrics, &current) {
-            (Some((p, _)), Some(c)) => p != c,
-            (None, Some(_)) => true,
-            _ => false,
-        };
-        if lyrics_stale && let Some(c) = current {
-            let l = cw_library::lyrics::load(&c);
-            self.lyrics = Some((c, l));
+        let track = self.lyric_track();
+        self.lyrics.update(track);
+    }
+
+    /// What lyrics should be found for: the remote player's track, or the
+    /// local file playing.
+    fn lyric_track(&self) -> Option<crate::lyrics_store::TrackRef> {
+        if self.sources.is_remote() {
+            let n = self.sources.state.as_ref()?.now.as_ref()?;
+            return Some(crate::lyrics_store::TrackRef {
+                key: format!("remote:{}", n.track_id),
+                path: None,
+                artist: n.artist.clone(),
+                title: n.title.clone(),
+                album: n.album.clone(),
+                duration: n.duration_secs,
+            });
         }
+        let (snap, player) = (self.snapshot.as_ref()?, self.player.as_ref()?);
+        let t = &player.tracks()[snap.track?];
+        Some(crate::lyrics_store::TrackRef {
+            key: t.path.to_string_lossy().into_owned(),
+            path: Some(t.path.clone()),
+            artist: t
+                .info
+                .artist
+                .clone()
+                .or_else(|| t.info.album_artist.clone()),
+            title: t.info.title.clone(),
+            album: t.info.album.clone(),
+            duration: t.info.duration_secs.or(snap.duration_secs),
+        })
+    }
+
+    /// Playback position for timing lyrics (with the `[` `]` nudge), and
+    /// the track length.
+    pub fn lyric_clock(&self) -> (f64, Option<f64>) {
+        let (pos, dur) = if self.sources.is_remote() {
+            match self.sources.state.as_ref() {
+                Some(s) => (
+                    s.position_now(std::time::Instant::now()),
+                    s.now.as_ref().and_then(|n| n.duration_secs),
+                ),
+                None => (0.0, None),
+            }
+        } else {
+            self.snapshot
+                .as_ref()
+                .map_or((0.0, None), |s| (s.position_secs, s.duration_secs))
+        };
+        (pos + self.lyrics_offset, dur)
     }
 
     /// Genre family of what is playing (local tags or the remote player).
@@ -471,11 +555,7 @@ impl App {
 
     /// Lyrics of the current track, if any.
     pub fn current_lyrics(&self) -> Option<&Lyrics> {
-        let current = self.current_path()?;
-        match &self.lyrics {
-            Some((p, l)) if *p == current => l.as_ref(),
-            _ => None,
-        }
+        self.lyrics.current()
     }
 
     /// Saves the queue for the next start.
@@ -658,6 +738,14 @@ impl App {
             self.redraw_requested = true;
             return;
         }
+        if self.settings_menu.open {
+            self.settings_key(key.code);
+            return;
+        }
+        if self.source_picker.is_some() {
+            self.source_picker_key(key.code);
+            return;
+        }
         // Text input first: the playlist-name prompt, then search.
         if let Some(text) = self.prompt.as_mut() {
             match key.code {
@@ -721,7 +809,7 @@ impl App {
                     .open(crate::browse::ViewKind::Search, self.library.as_ref());
             }
             KeyCode::Char('P') => self.prompt = Some(String::new()),
-            KeyCode::Char('S') => self.switch_source(),
+            KeyCode::Char('S') => self.open_source_picker(),
             KeyCode::Char('L') if self.sources.active == SourceKind::Spotify => {
                 self.sources.send(Remote::Login);
                 self.say("opening Spotify login in your browser");
@@ -733,6 +821,10 @@ impl App {
             KeyCode::Char('D') => self.debug_page = self.debug_page.next(),
             KeyCode::Char('R') => self.reload_recipe(),
             KeyCode::Char('?') => self.show_help = !self.show_help,
+            KeyCode::Char(',') => {
+                self.show_help = false;
+                self.settings_menu.open = true;
+            }
             KeyCode::Char('c') => {
                 self.art_style = self.art_style.next();
                 self.say(format!("art style: {}", self.art_style.name()));
@@ -826,6 +918,285 @@ impl App {
 
     /// `S`: the next source. Local playback pauses while a remote source is
     /// followed.
+    /// Keys while the settings menu is open.
+    fn settings_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => self.settings_menu.move_by(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.settings_menu.move_by(1),
+            KeyCode::Left | KeyCode::Char('h') => self.change_setting(-1),
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter | KeyCode::Char(' ') => {
+                self.change_setting(1)
+            }
+            KeyCode::Esc | KeyCode::Char(',') | KeyCode::Char('q') => {
+                self.settings_menu.open = false
+            }
+            _ => {}
+        }
+    }
+
+    /// A setting's current value, as shown in the menu.
+    pub fn setting_value(&self, item: crate::settings_menu::Item) -> String {
+        use crate::settings_menu::Item;
+        use cw_render::lyrics::{LyricScroll, LyricSize, LyricStyle};
+        let on = |b: bool| if b { "on" } else { "off" }.to_string();
+        match item {
+            Item::ShowLyrics => on(self.show_lyrics),
+            Item::LyricStyle => match self.lyric_view.style {
+                LyricStyle::BigCurrent => "big line",
+                LyricStyle::Text => "text",
+                LyricStyle::BigOnly => "big only",
+            }
+            .into(),
+            Item::LyricScroll => match self.lyric_view.scroll {
+                LyricScroll::Up => "up",
+                LyricScroll::Down => "down",
+            }
+            .into(),
+            Item::LyricSize => match self.lyric_view.size {
+                LyricSize::Small => "small",
+                LyricSize::Medium => "medium",
+                LyricSize::Large => "large",
+            }
+            .into(),
+            Item::LyricColors => match self.lyric_view.paint {
+                cw_render::lyrics::LyricPaint::Accent => "accent",
+                cw_render::lyrics::LyricPaint::Cover => "cover",
+            }
+            .into(),
+            Item::LyricsOnline => on(self.lyrics.online()),
+            Item::ArtStyle => self.art_style.name().into(),
+            Item::Motion => on(self.motion),
+            Item::FontSize if self.font_size <= 0.0 => "unchanged".into(),
+            Item::FontSize => format!("{} pt", self.font_size),
+            Item::Source => self.sources.active.name().to_lowercase(),
+            Item::SpotifyLogin => match self.sources.state.as_ref().map(|s| &s.auth) {
+                _ if self.sources.active != SourceKind::Spotify => "switch source first".into(),
+                Some(cw_sources::Auth::Ready) => "logged in (enter: log out)".into(),
+                Some(cw_sources::Auth::LoggingIn) => "finish in your browser".into(),
+                _ => "log in".into(),
+            },
+            Item::SpotifyOffline => if self.sources.offline_always {
+                "always (offline mode)"
+            } else {
+                "auto"
+            }
+            .into(),
+            Item::SaveAhead => match self.sources.save_ahead {
+                cw_sources::offline::SaveAhead::Off => "off",
+                cw_sources::offline::SaveAhead::Liked => "liked songs",
+                cw_sources::offline::SaveAhead::All => "liked + playlists",
+            }
+            .into(),
+            Item::OfflineSaved => self.sources.offline_summary(),
+            Item::TempoOnline => {
+                let v = on(self.sources.tempo_lookup);
+                format!("{v} (from the next start)")
+            }
+        }
+    }
+
+    /// Changes the selected setting by one step, applies it and saves it.
+    fn change_setting(&mut self, dir: i32) {
+        use crate::settings_menu::{FONT_SIZES, Item, Saved, step};
+        use cw_render::lyrics::{LyricScroll, LyricSize, LyricStyle};
+        let item = self.settings_menu.selected();
+        let saved: Option<(Option<&str>, &str, Saved)> = match item {
+            Item::ShowLyrics => {
+                self.show_lyrics = !self.show_lyrics;
+                None
+            }
+            Item::LyricStyle => {
+                let all = [
+                    LyricStyle::BigCurrent,
+                    LyricStyle::Text,
+                    LyricStyle::BigOnly,
+                ];
+                self.lyric_view.style = step(&all, self.lyric_view.style, dir);
+                let name = match self.lyric_view.style {
+                    LyricStyle::BigCurrent => "big",
+                    LyricStyle::Text => "text",
+                    LyricStyle::BigOnly => "big_only",
+                };
+                Some((Some("lyrics"), "style", Saved::Text(name.into())))
+            }
+            Item::LyricScroll => {
+                self.lyric_view.scroll = step(
+                    &[LyricScroll::Up, LyricScroll::Down],
+                    self.lyric_view.scroll,
+                    dir,
+                );
+                let name = if self.lyric_view.scroll == LyricScroll::Up {
+                    "up"
+                } else {
+                    "down"
+                };
+                Some((Some("lyrics"), "scroll", Saved::Text(name.into())))
+            }
+            Item::LyricSize => {
+                let all = [LyricSize::Small, LyricSize::Medium, LyricSize::Large];
+                self.lyric_view.size = step(&all, self.lyric_view.size, dir);
+                let name = match self.lyric_view.size {
+                    LyricSize::Small => "small",
+                    LyricSize::Medium => "medium",
+                    LyricSize::Large => "large",
+                };
+                Some((Some("lyrics"), "size", Saved::Text(name.into())))
+            }
+            Item::LyricColors => {
+                use cw_render::lyrics::LyricPaint;
+                self.lyric_view.paint = step(
+                    &[LyricPaint::Accent, LyricPaint::Cover],
+                    self.lyric_view.paint,
+                    dir,
+                );
+                let name = if self.lyric_view.paint == LyricPaint::Cover {
+                    "cover"
+                } else {
+                    "accent"
+                };
+                Some((Some("lyrics"), "colors", Saved::Text(name.into())))
+            }
+            Item::LyricsOnline => {
+                let on = !self.lyrics.online();
+                self.lyrics.set_online(on);
+                self.sources.set_lyrics_online(on);
+                Some((Some("lyrics"), "online_lookup", Saved::Flag(on)))
+            }
+            Item::ArtStyle => {
+                self.art_style = if dir > 0 {
+                    self.art_style.next()
+                } else {
+                    self.art_style.next().next()
+                };
+                Some((None, "art_style", Saved::Text(self.art_style.name().into())))
+            }
+            Item::Motion => {
+                self.motion = !self.motion;
+                Some((None, "motion", Saved::Flag(self.motion)))
+            }
+            Item::FontSize => {
+                self.font_size = step(&FONT_SIZES, self.font_size, dir);
+                if !crate::term::set_font_size(self.font_size) && self.font_size > 0.0 {
+                    self.say("the font size changes only in Ghostty");
+                }
+                self.redraw_requested = true;
+                Some((None, "font_size", Saved::Number(self.font_size as f64)))
+            }
+            Item::Source => {
+                self.switch_source();
+                None
+            }
+            Item::SpotifyLogin => {
+                if self.sources.active != SourceKind::Spotify {
+                    self.say("choose Spotify as the source first");
+                } else if matches!(
+                    self.sources.state.as_ref().map(|s| &s.auth),
+                    Some(cw_sources::Auth::Ready)
+                ) {
+                    self.sources.send(Remote::Logout);
+                    self.say("logged out of Spotify");
+                } else {
+                    self.sources.send(Remote::Login);
+                    self.say("opening Spotify login in your browser");
+                }
+                None
+            }
+            Item::SpotifyOffline => {
+                let on = !self.sources.offline_always;
+                self.sources.set_offline_always(on);
+                let value = if on { "always" } else { "auto" };
+                Some((Some("spotify"), "offline", Saved::Text(value.into())))
+            }
+            Item::SaveAhead => {
+                use cw_sources::offline::SaveAhead;
+                let all = [SaveAhead::Off, SaveAhead::Liked, SaveAhead::All];
+                let m = step(&all, self.sources.save_ahead, dir);
+                self.sources.set_save_ahead(m);
+                Some((Some("spotify"), "save_ahead", Saved::Text(m.name().into())))
+            }
+            Item::OfflineSaved => None,
+            Item::TempoOnline => {
+                self.sources.tempo_lookup = !self.sources.tempo_lookup;
+                Some((
+                    Some("tempo"),
+                    "online_lookup",
+                    Saved::Flag(self.sources.tempo_lookup),
+                ))
+            }
+        };
+        if let (Some((section, key, value)), Some(path)) = (saved, self.config_path.as_deref())
+            && let Err(e) = crate::settings_menu::save(path, section, key, value)
+        {
+            self.say(format!("could not save: {e}"));
+        }
+    }
+
+    /// Opens the source picker on the current source.
+    fn open_source_picker(&mut self) {
+        if let Some(hint) = self.sources.hint() {
+            self.say(hint);
+            return;
+        }
+        let i = self
+            .sources
+            .available()
+            .iter()
+            .position(|k| *k == self.sources.active)
+            .unwrap_or(0);
+        self.source_picker = Some(i);
+    }
+
+    fn source_picker_key(&mut self, code: KeyCode) {
+        let n = self.sources.available().len().max(1);
+        let Some(i) = self.source_picker else { return };
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => self.source_picker = Some((i + n - 1) % n),
+            KeyCode::Down | KeyCode::Char('j') => self.source_picker = Some((i + 1) % n),
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.source_picker = None;
+                let kind = self.sources.available()[i.min(n - 1)];
+                self.choose_source(kind);
+            }
+            KeyCode::Esc | KeyCode::Char('S') | KeyCode::Char('q') => self.source_picker = None,
+            _ => {}
+        }
+    }
+
+    /// Makes `kind` the source, pausing local playback for a remote one.
+    pub fn choose_source(&mut self, kind: SourceKind) {
+        if kind == self.sources.active {
+            return;
+        }
+        self.sources.select(kind);
+        if kind != SourceKind::Local
+            && let Some(p) = self.player.as_mut()
+        {
+            p.set_paused(true);
+        }
+        self.say(format!("source: {}", kind.name()));
+    }
+
+    /// What the picker says about a source.
+    pub fn source_status(&self, kind: SourceKind) -> String {
+        match kind {
+            SourceKind::Local => match &self.library {
+                Some(_) if !self.scan_status.is_empty() => self.scan_status.clone(),
+                Some(_) => "your music files".into(),
+                None => "files given on the command line".into(),
+            },
+            SourceKind::Spotify if self.sources.active == SourceKind::Spotify => {
+                match self.sources.state.as_ref().map(|s| &s.auth) {
+                    Some(cw_sources::Auth::Ready) => "logged in".into(),
+                    Some(cw_sources::Auth::LoggingIn) => "finish logging in in your browser".into(),
+                    Some(cw_sources::Auth::NeedsLogin) => "press L to log in".into(),
+                    None => "connecting".into(),
+                }
+            }
+            SourceKind::Spotify => "follows and controls Spotify".into(),
+            SourceKind::AppleMusic => "follows and controls Music".into(),
+        }
+    }
+
     fn switch_source(&mut self) {
         if let Some(hint) = self.sources.hint() {
             self.say(hint);
@@ -966,6 +1337,10 @@ impl App {
                 self.sources.send(Remote::Play(req));
                 self.say("starting playback in Spotify");
             }
+            RemoteAction::Transfer { id, name } => {
+                self.sources.send(Remote::Transfer(id));
+                self.say(format!("moving playback to {name}"));
+            }
         }
     }
 
@@ -1023,6 +1398,94 @@ mod tests {
         assert_eq!(ColorMode::detect_from(false, &ct), ColorMode::TrueColor);
         let wt = |k: &str| (k == "WT_SESSION").then(|| "x".to_string());
         assert_eq!(ColorMode::detect_from(false, &wt), ColorMode::TrueColor);
+    }
+
+    #[test]
+    fn settings_menu_changes_applies_and_saves() {
+        let dir = std::env::temp_dir().join(format!("cw-menu-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let mut app = App::new(30, None, None, Settings::default(), test_context());
+        app.config_path = Some(path.clone());
+        app.on_key(press(KeyCode::Char(',')));
+        assert!(app.settings_menu.open);
+        // Show lyrics, then style: right twice -> big only.
+        app.on_key(press(KeyCode::Enter));
+        assert!(app.show_lyrics);
+        app.on_key(press(KeyCode::Down));
+        app.on_key(press(KeyCode::Right));
+        app.on_key(press(KeyCode::Right));
+        assert_eq!(app.lyric_view.style, cw_render::lyrics::LyricStyle::BigOnly);
+        // Motion: down to the art section's second row.
+        while app.settings_menu.selected() != crate::settings_menu::Item::Motion {
+            app.on_key(press(KeyCode::Down));
+        }
+        assert_eq!(
+            app.settings_menu.selected(),
+            crate::settings_menu::Item::Motion
+        );
+        app.on_key(press(KeyCode::Left));
+        assert!(!app.motion);
+        let (c, _) = crate::config::Config::load(&path);
+        assert_eq!(c.lyrics.style, "big_only");
+        assert!(!c.motion);
+        // Playback keys do not leak through while the menu is open; esc closes.
+        app.on_key(press(KeyCode::Char('q')));
+        assert!(!app.should_quit && !app.settings_menu.open);
+
+        // It draws.
+        app.on_key(press(KeyCode::Char(',')));
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 36)).unwrap();
+        term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        let text: String = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        if std::env::var("SHOW_MENU").is_ok() {
+            println!("{text}");
+        }
+        assert!(text.contains("settings") && text.contains("ghostty font size"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn source_picker_opens_moves_and_closes() {
+        let mut app = App::new(30, None, None, Settings::default(), test_context());
+        app.on_key(press(KeyCode::Char('S')));
+        if app.sources.available().len() == 1 {
+            // Only local files here: a hint instead of a list.
+            assert!(app.source_picker.is_none());
+            return;
+        }
+        assert_eq!(app.source_picker, Some(0));
+        app.on_key(press(KeyCode::Down));
+        assert_eq!(app.source_picker, Some(1));
+        app.on_key(press(KeyCode::Up));
+        app.on_key(press(KeyCode::Up));
+        assert_eq!(app.source_picker, Some(app.sources.available().len() - 1));
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        let text: String = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        if std::env::var("SHOW_MENU").is_ok() {
+            println!("{text}");
+        }
+        assert!(text.contains("source") && text.contains("local  (now)"));
+        // Esc closes without switching; q does not quit while it is open.
+        app.on_key(press(KeyCode::Char('q')));
+        assert!(app.source_picker.is_none() && !app.should_quit);
+        assert_eq!(app.sources.active, SourceKind::Local);
     }
 
     #[test]

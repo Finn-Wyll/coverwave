@@ -40,6 +40,29 @@ final class AppSettings {
         didSet { defaults.set(artDetail.rawValue, forKey: "artDetail") }
     }
 
+    /// Lyrics instead of the cover (the cover keeps moving behind them).
+    var showLyrics: Bool {
+        didSet { defaults.set(showLyrics, forKey: "showLyrics") }
+    }
+
+    var lyricStyle: LyricStyleKind {
+        didSet { defaults.set(lyricStyle.key, forKey: "lyricStyle") }
+    }
+
+    var lyricScroll: LyricScrollKind {
+        didSet { defaults.set(lyricScroll.key, forKey: "lyricScroll") }
+    }
+
+    /// Lyric colours: the accent, or the cover's own (letters as windows).
+    var lyricPaint: LyricPaintKind {
+        didSet { defaults.set(lyricPaint == .cover ? "cover" : "accent", forKey: "lyricPaint") }
+    }
+
+    /// How big the large lyric letters are (Detail only makes them finer).
+    var lyricSize: LyricSizeKind {
+        didSet { defaults.set(lyricSize.key, forKey: "lyricSize") }
+    }
+
     /// How touches on the art control playback.
     var gestures: GestureScheme {
         didSet { defaults.set(gestures.rawValue, forKey: "gestures") }
@@ -48,6 +71,16 @@ final class AppSettings {
     /// The gesture guide has been shown once.
     var seenGestureGuide: Bool {
         didSet { defaults.set(seenGestureGuide, forKey: "seenGestureGuide") }
+    }
+
+    /// What to save ahead for offline listening.
+    var saveAhead: OfflineSaver.Scope {
+        didSet { defaults.set(saveAhead.rawValue, forKey: "saveAhead") }
+    }
+
+    /// Save ahead over mobile data too (else Wi-Fi only).
+    var saveOnMobileData: Bool {
+        didSet { defaults.set(saveOnMobileData, forKey: "saveOnMobileData") }
     }
 
     /// The source to reconnect to on launch.
@@ -66,7 +99,17 @@ final class AppSettings {
         lastSource = defaults.string(forKey: "lastSource").flatMap(SourceKind.init(rawValue:))
         artDetail = ArtDetail(rawValue: defaults.string(forKey: "artDetail") ?? "") ?? .fine
         gestures = GestureScheme(rawValue: defaults.string(forKey: "gestures") ?? "") ?? .direct
+        showLyrics = defaults.bool(forKey: "showLyrics")
+        let savedStyle = defaults.string(forKey: "lyricStyle")
+        lyricStyle = LyricStyleKind.allCases.first { $0.key == savedStyle } ?? .bigCurrent
+        let savedScroll = defaults.string(forKey: "lyricScroll")
+        lyricScroll = LyricScrollKind.allCases.first { $0.key == savedScroll } ?? .up
+        lyricPaint = defaults.string(forKey: "lyricPaint") == "cover" ? .cover : .accent
+        let savedSize = defaults.string(forKey: "lyricSize")
+        lyricSize = LyricSizeKind.allCases.first { $0.key == savedSize } ?? .medium
         seenGestureGuide = defaults.bool(forKey: "seenGestureGuide")
+        saveAhead = OfflineSaver.Scope(rawValue: defaults.string(forKey: "saveAhead") ?? "") ?? .liked
+        saveOnMobileData = defaults.bool(forKey: "saveOnMobileData")
     }
 
     func animates(reduceMotion: Bool) -> Bool {
@@ -95,6 +138,67 @@ extension ArtMode: CaseIterable, Identifiable {
         case .palette: "Palette"
         case .trueColor: "True colour"
         case .duotone: "Duotone"
+        }
+    }
+}
+
+extension LyricStyleKind: CaseIterable, Identifiable {
+    public static var allCases: [LyricStyleKind] { [.bigCurrent, .text, .bigOnly] }
+    public var id: String { key }
+
+    var key: String {
+        switch self {
+        case .bigCurrent: "big"
+        case .text: "text"
+        case .bigOnly: "big_only"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .bigCurrent: "Big Line"
+        case .text: "Text"
+        case .bigOnly: "Big Only"
+        }
+    }
+}
+
+extension LyricScrollKind: CaseIterable, Identifiable {
+    public static var allCases: [LyricScrollKind] { [.up, .down] }
+    public var id: String { key }
+
+    var key: String {
+        switch self {
+        case .up: "up"
+        case .down: "down"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .up: "Up"
+        case .down: "Down"
+        }
+    }
+}
+
+extension LyricSizeKind: CaseIterable, Identifiable {
+    public static var allCases: [LyricSizeKind] { [.small, .medium, .large] }
+    public var id: String { key }
+
+    var key: String {
+        switch self {
+        case .small: "small"
+        case .medium: "medium"
+        case .large: "large"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .small: "Small"
+        case .medium: "Medium"
+        case .large: "Large"
         }
     }
 }

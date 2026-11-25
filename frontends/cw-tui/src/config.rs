@@ -21,6 +21,9 @@ pub struct Config {
     pub offline: bool,
     /// Start with cover motion on.
     pub motion: bool,
+    /// Ghostty: coverwave's window uses this font size (points) while it
+    /// runs, for finer art. 0 leaves the font alone.
+    pub font_size: f32,
     /// Kept from the planned config; reserved.
     pub change_budget: Option<f32>,
     pub charset: Option<String>,
@@ -54,6 +57,11 @@ pub struct Spotify {
     pub client_id: String,
     /// Register `http://127.0.0.1:<port>/callback` in that app.
     pub redirect_port: u16,
+    /// "auto" (follow the Spotify app only when the internet is gone) |
+    /// "always" (offline mode: never use the internet for Spotify)
+    pub offline: String,
+    /// Saved ahead for offline: "off" | "liked" | "all" (liked + playlists)
+    pub save_ahead: String,
 }
 
 impl Default for Spotify {
@@ -61,6 +69,8 @@ impl Default for Spotify {
         Spotify {
             client_id: String::new(),
             redirect_port: 8898,
+            offline: "auto".into(),
+            save_ahead: "liked".into(),
         }
     }
 }
@@ -78,11 +88,31 @@ impl Default for Capture {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Lyrics {
-    /// Reserved for LRCLIB lookup (not implemented; stays off).
+    /// Look lyrics up on LRCLIB (sends artist, title, album, length).
     pub online_lookup: bool,
+    /// "big" (sung line in big letters) | "text" | "big_only"
+    pub style: String,
+    /// "up" (new lines rise, like Spotify) | "down"
+    pub scroll: String,
+    /// Big letters: "small" | "medium" | "large" (same at any font size)
+    pub size: String,
+    /// "accent" | "cover" (letters as windows onto the cover)
+    pub colors: String,
+}
+
+impl Default for Lyrics {
+    fn default() -> Self {
+        Lyrics {
+            online_lookup: true,
+            style: "big".into(),
+            scroll: "up".into(),
+            size: "medium".into(),
+            colors: "accent".into(),
+        }
+    }
 }
 
 impl Default for Config {
@@ -95,6 +125,7 @@ impl Default for Config {
             cell_aspect: toml::Value::String("auto".into()),
             offline: false,
             motion: true,
+            font_size: 9.0,
             change_budget: None,
             charset: None,
             lyrics: Lyrics::default(),
@@ -150,16 +181,31 @@ art_style = "palette"   # palette | truecolor | duotone  (c cycles in the app)
 cell_aspect = "auto"    # auto (measured) or a number such as 0.5
 offline = false         # true: never download the cover-analysis model
 motion = true           # false: start with cover motion off (m toggles)
+font_size = 9           # Ghostty: font size while coverwave runs, for finer
+                        # art; reset on quit. 0 leaves the font alone.
 
 [spotify]
 # Your Spotify app's public client ID (developer.spotify.com > Dashboard).
 # In the app, add the redirect URI http://127.0.0.1:8898/callback
 client_id = ""
 redirect_port = 8898
+# Offline: coverwave follows the Spotify app (macOS), which plays your
+# downloaded songs, and uses what it saved: covers, genres, tempos, lyrics
+# and your library's listings.
+offline = "auto"        # auto (when the internet is gone) | always
+save_ahead = "liked"    # save ahead for offline: off | liked | all (+ playlists)
 
 [capture]
 # Listen to Spotify / Apple Music so their covers react to the music.
 enabled = true
+
+[lyrics]
+# l shows lyrics instead of the cover (the cover keeps moving behind).
+online_lookup = true    # look lyrics up on LRCLIB (sends artist, title, album)
+style = "big"           # big (sung line in big letters) | text | big_only
+scroll = "up"           # up (new lines rise, like Spotify) | down
+size = "medium"         # big letters: small | medium | large
+colors = "accent"       # accent | cover (letters as windows onto the cover)
 
 [tempo]
 # When a remote track's audio cannot be captured, the cover moves to a beat
@@ -177,6 +223,9 @@ mod tests {
         let c: Config = toml::from_str(TEMPLATE).unwrap();
         assert_eq!(c, Config::default());
         assert_eq!(c.cell_aspect(), None);
+        assert_eq!(c.font_size, 9.0, "Ghostty zoom on by default");
+        let off: Config = toml::from_str("font_size = 0").unwrap();
+        assert_eq!(off.font_size, 0.0);
     }
 
     #[test]

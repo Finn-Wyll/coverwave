@@ -145,11 +145,23 @@ pub(super) fn prepare(layer: &Layer, c: &PrepCtx<'_>, rng: &mut ChaCha8Rng) -> O
             let (cx, cy, _) = centre(c);
             let width = width.clamp(1, 3) as i32;
             let wi = c.w as i32;
+            // The subject: its mask, or with none (lyrics, covers without
+            // one) whatever is drawn densely in the art.
+            let has_mask = (art.y..art.y + art.h).any(|y| {
+                (art.x..art.x + art.w).any(|x| c.protected[y as usize * c.w as usize + x as usize])
+            });
+            let subject = |i: usize| {
+                if has_mask {
+                    c.protected[i]
+                } else {
+                    c.density[i] > 0.4
+                }
+            };
             let mut cells = Vec::new();
             for y in art.y as i32..(art.y + art.h) as i32 {
                 for x in art.x as i32..(art.x + art.w) as i32 {
                     let i = (y * wi + x) as usize;
-                    if c.protected[i] {
+                    if subject(i) {
                         continue;
                     }
                     // Near the subject: within `width` rows / 2*width columns.
@@ -160,7 +172,7 @@ pub(super) fn prepare(layer: &Layer, c: &PrepCtx<'_>, rng: &mut ChaCha8Rng) -> O
                                 && yy >= 0
                                 && xx < wi
                                 && yy < c.h as i32
-                                && c.protected[(yy * wi + xx) as usize]
+                                && subject((yy * wi + xx) as usize)
                         })
                     });
                     if near {
@@ -564,15 +576,31 @@ pub(super) fn draw(
         }
         Extra::RowGlitch { events } => {
             let strength = (amp * (0.6 + 0.8 * audio.onset.clamp(0.0, 1.0))).min(1.2);
-            for g in events {
-                if frac(phase - g.start) >= g.len {
+            // Besides its own moments in the loop, a slip on about half the
+            // strong beats; which ones comes from the seed and beat count.
+            let beat_hash =
+                super::hash_u64(scene.seed ^ audio.onset_count.wrapping_mul(0xD6E8_FEB8_6659_FD93));
+            let on_beat = (audio.onset >= 0.7 && !events.is_empty()).then(|| {
+                (super::hash_unit(beat_hash) < 0.5).then_some(beat_hash as usize % events.len())
+            });
+            for (k, g) in events.iter().enumerate() {
+                let beat_slip = on_beat.flatten() == Some(k);
+                if frac(phase - g.start) >= g.len && !beat_slip {
                     continue;
                 }
                 let shift = (g.shift as f32 * strength).round() as i32;
                 if shift == 0 {
                     continue;
                 }
-                for y in g.y0..(g.y0 + g.rows).min(art.y + art.h) {
+                // A slip on a beat is a bigger tear (three times the rows)
+                // at a place of its own, so over a song it reaches every row.
+                let (y0, rows) = if beat_slip {
+                    let y = art.y + ((beat_hash >> 20) % art.h.max(1) as u64) as u16;
+                    (y, g.rows * 3)
+                } else {
+                    (g.y0, g.rows)
+                };
+                for y in y0..(y0 + rows).min(art.y + art.h) {
                     for x in art.x..art.x + art.w {
                         let i = y as usize * w + x as usize;
                         if scene.protected[i] {

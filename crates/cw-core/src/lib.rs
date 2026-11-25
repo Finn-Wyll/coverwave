@@ -7,6 +7,7 @@ pub mod art;
 pub mod audio;
 pub mod beat;
 pub mod color;
+pub mod lyrics;
 pub mod queue;
 pub mod recipe;
 pub mod rhythm;

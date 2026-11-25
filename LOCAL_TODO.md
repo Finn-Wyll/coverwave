@@ -246,6 +246,34 @@ Nothing here has run on Windows yet.
       the beat you hear from the first seconds of a song. If a song's
       Rhythm line says "bar start estimated", Deezer has a different edit
       of it; tell me which songs feel off.
+- [ ] **Spotify stays logged in:** log in once more (the iPhone app now
+      uses Spotify's web login). Then pause a song, close coverwave, wait a
+      while, and open it again: it should show the paused song with no
+      login. Settings > This Cover > Genre should no longer say unknown.
+- [ ] **Spotify devices:** with music playing on the Mac, the cover's
+      text says "on <your mac>". Swipe down: the devices list at the top
+      moves playback (tap "this iPhone" to bring it to the phone).
+- [ ] **Lyrics:** desktop `l`, iPhone two-finger sideways swipe. Spotify
+      songs should now have lyrics (from LRCLIB) with the cover still
+      moving behind and around them, in a square where the cover was. Try
+      the styles and Lyric Size (Settings > Lyrics on the phone;
+      `[lyrics] style = "big" | "text" | "big_only"`,
+      `scroll = "up" | "down"`, `size = "small" | "medium" | "large"` and
+      `colors = "accent" | "cover"` in the desktop config, or `,`).
+      "Cover" colours make the letters windows onto the art. Effects that
+      light the cover (sweeps, flicker, glow, rays) should light the
+      letters too. Detail (phone) or a smaller terminal font
+      should make the big letters finer, not smaller. `[` `]` nudge the
+      timing on the desktop.
+- [ ] **Desktop settings:** `,` opens the settings menu (lyrics, art,
+      Ghostty font size, sources, tempo). Changes apply at once and are
+      saved to `config.toml` with your comments kept.
+- [ ] **Desktop devices:** Spotify library (`tab`) > Devices > `enter`
+      moves playback; the HUD and the right panel show "on <device>".
+- [ ] **Ghostty zoom:** run `coverwave` in Ghostty: its window drops to a
+      9 pt font (more, finer characters) and goes back when you quit with
+      `q`. Change the size with `font_size` in
+      `~/.config/coverwave/config.toml` (0 turns it off).
 - [ ] **Art detail:** Settings > Detail: Standard (64 columns), Fine
       (96, the new default) and Finest (128). Check Finest still moves
       smoothly on your iPhone 13; if it stutters, say so.
@@ -253,4 +281,40 @@ Nothing here has run on Windows yet.
       catalogue songs (not just your playlists) and Apple Music catalogue
       songs below your own library matches. On the Mac, Spotify library:
       `/`, type, `enter` searches all of Spotify.
+
+## Offline Spotify (2026-11-25)
+
+- [ ] iPhone: in Settings > Offline, tap **Log In Again for Offline** if it
+      shows (the login now asks Spotify for `app-remote-control`).
+- [ ] iPhone, while online: leave coverwave open on Wi-Fi for a while and
+      watch Settings > Offline > Saved count up. Check the size is sensible.
+- [ ] iPhone, online: Settings > Offline > **Prepare for Offline**. Spotify
+      opens, asks once, and comes back; the row should then say "Ready,
+      authorised just now". (Spotify's docs: App Remote must be authorised
+      online; coverwave keeps the token the Spotify app accepted and renews
+      it quietly every 30 minutes while Spotify is open and you are online.)
+- [ ] iPhone: turn on Airplane mode, open Spotify (play a downloaded song),
+      then open coverwave and pick **offline** on the start screen. Does it
+      connect, show the song, its cover and lyrics, and move with its rhythm?
+      If it says Spotify didn't answer, tap again: it should open Spotify to
+      authorize. This is the big unknown: Spotify does not say whether App
+      Remote works offline.
+- [ ] iPhone: in the Spotify mode, turn the internet off mid-song. coverwave
+      should switch to the Spotify app by itself, and back when it returns.
+- [ ] iPhone offline: library panel opens saved liked songs and playlists;
+      playing a playlist row starts at that song; search finds saved songs.
+- [ ] Spotify dashboard: App Remote needs the iOS bundle ID
+      (com.finnleywyllie.coverwave) in your Spotify app's settings; it was
+      there when App Remote was used before.
+- [ ] Mac: with Spotify (the desktop app) playing a downloaded song, turn
+      Wi-Fi off. Within ~30 s coverwave should follow the Spotify app
+      (macOS asks once to let your terminal control Spotify). Transport keys,
+      the saved library and the cover should still work.
+- [ ] Mac: `,` > offline > spotify offline = always, then check nothing goes
+      online; save ahead fills `~/.local/share/coverwave/offline/`.
+- [ ] iPhone: how long offline lasts. Prepare for Offline, turn on Airplane
+      mode, wait over an hour, then pick offline. Spotify's tokens nominally
+      last an hour; if the Spotify app refuses older ones offline, offline
+      would only last about an hour after the last renewal, and the docs
+      should say so.
 

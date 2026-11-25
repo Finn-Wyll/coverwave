@@ -202,8 +202,89 @@ struct LibraryPanel: View {
 }
 
 /// What plays next. Drops from the top (where the swipe down came from).
+/// Where Spotify plays: its devices, the active one marked. Tap one to move
+/// playback there. This iPhone is offered even while its Spotify is asleep.
+struct DevicePicker: View {
+    let spotify: SpotifySource
+    @State private var devices: [SpotifySource.Device] = []
+    @State private var moving: String?
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("devices")
+                .font(Term.font(12))
+                .foregroundStyle(Term.dim)
+                .padding(.horizontal, 20)
+                .padding(.top, 8)
+                .padding(.bottom, 2)
+            ForEach(devices) { d in
+                row(d.name, kind: d.isPhone ? "this iphone" : d.type.lowercased(), active: d.id == spotify.device?.id) {
+                    await move(d.name) { try await spotify.transfer(to: d) }
+                }
+            }
+            if !devices.contains(where: \.isPhone) {
+                row("this iPhone", kind: "wakes spotify", active: false) {
+                    await move("this iPhone") { try await spotify.transferToThisPhone() }
+                }
+            }
+            if let error {
+                Text("! \(error.lowercased())")
+                    .font(Term.font(12))
+                    .foregroundStyle(Term.ink)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 6)
+            }
+        }
+        .padding(.bottom, 8)
+        .task { await refresh() }
+        .onChange(of: spotify.device?.id) { Task { await refresh() } }
+    }
+
+    private func row(_ name: String, kind: String, active: Bool, action: @escaping () async -> Void) -> some View {
+        Button {
+            Task { await action() }
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 0) {
+                Text(active ? "> " : "  ").foregroundStyle(.tint)
+                Text(name.lowercased())
+                    .foregroundStyle(active ? AnyShapeStyle(.tint) : AnyShapeStyle(Term.ink))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text(moving == name ? "moving..." : kind)
+                    .font(Term.font(12))
+                    .foregroundStyle(Term.dim)
+            }
+            .font(Term.font(15, active ? .medium : .regular))
+            .padding(.horizontal, 20)
+            .frame(minHeight: 44)
+        }
+        .buttonStyle(TermRowStyle())
+        .disabled(moving != nil)
+        .accessibilityLabel(active ? "\(name), playing here" : "Play on \(name)")
+    }
+
+    private func move(_ name: String, _ body: () async throws -> Void) async {
+        error = nil
+        moving = name
+        do {
+            try await body()
+        } catch {
+            self.error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+        moving = nil
+        await refresh()
+    }
+
+    private func refresh() async {
+        if let list = try? await spotify.devices() { devices = list }
+    }
+}
+
 struct QueuePanel: View {
     let provider: (any LibraryProvider)?
+    /// Set while following Spotify: shows its devices above the queue.
+    var spotify: SpotifySource? = nil
     let onHeaderDrag: (CGFloat, CGFloat?) -> Void
     let close: () -> Void
     @State private var snapshot: QueueSnapshot?
@@ -214,6 +295,10 @@ struct QueuePanel: View {
             // The list only scrolls; it never moves the panel.
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
+                    if let spotify {
+                        DevicePicker(spotify: spotify)
+                        Divider().overlay(Term.faint).padding(.horizontal, 20)
+                    }
                     content
                 }
                 .padding(.vertical, 6)

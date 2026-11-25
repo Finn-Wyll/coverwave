@@ -19,9 +19,10 @@ enum RhythmLookup {
         return try? RhythmEngine(onnx: data)
     }
 
-    static func rhythm(for track: NowPlaying) async -> Rhythm? {
+    /// Without `network`, only a saved map.
+    static func rhythm(for track: NowPlaying, network: Bool = true) async -> Rhythm? {
         if let cached = RhythmCache.load(track.trackID) { return cached }
-        guard let deezer = await deezerTrack(track),
+        guard network, let deezer = await Deezer.track(for: track),
             let preview = deezer.preview.flatMap(URL.init(string:)),
             let (data, response) = try? await URLSession.shared.data(from: preview),
             (response as? HTTPURLResponse)?.statusCode == 200,
@@ -38,12 +39,6 @@ enum RhythmLookup {
 
     // MARK: Finding a preview
 
-    private struct DeezerTrack: Decodable {
-        let id: Int?
-        let preview: String?
-        let duration: Int?
-    }
-
     /// Deezer cuts every preview from 48 seconds into the track (measured
     /// on library songs: 47.97 to 48.02s whenever the recordings match), so
     /// the preview's beat grid extends to the whole song.
@@ -52,49 +47,10 @@ enum RhythmLookup {
     /// Where the preview starts in the song being played, if that is known:
     /// the track must be long enough for a preview from 48s, and Deezer's
     /// version must be the same length (within 3s) as the one playing.
-    private static func clipStart(_ deezer: DeezerTrack, playing: NowPlaying) -> Double? {
+    private static func clipStart(_ deezer: Deezer.Track, playing: NowPlaying) -> Double? {
         guard let d = deezer.duration, Double(d) >= deezerPreviewStart + 30 else { return nil }
         if let playing = playing.duration, abs(playing - Double(d)) > 3 { return nil }
         return deezerPreviewStart
-    }
-
-    private struct DeezerSearch: Decodable {
-        let data: [DeezerTrack]
-    }
-
-    private static func mainArtist(_ track: NowPlaying) -> String {
-        (track.artist.split(separator: ",").first.map(String.init) ?? track.artist)
-            .trimmingCharacters(in: .whitespaces)
-    }
-
-    private static func deezerTrack(_ track: NowPlaying) async -> DeezerTrack? {
-        if let isrc = track.isrc,
-            let t: DeezerTrack = await get("https://api.deezer.com/track/isrc:\(isrc)"), t.id != nil
-        {
-            return t
-        }
-        let artist = mainArtist(track)
-        let clean = { (s: String) in s.replacingOccurrences(of: "\"", with: "") }
-        guard !artist.isEmpty,
-            let search: DeezerSearch = await get(
-                "https://api.deezer.com/search",
-                query: [
-                    URLQueryItem(name: "limit", value: "1"),
-                    URLQueryItem(name: "q", value: "artist:\"\(clean(artist))\" track:\"\(clean(track.title))\""),
-                ]),
-            let id = search.data.first?.id
-        else { return nil }
-        return await get("https://api.deezer.com/track/\(id)")
-    }
-
-    private static func get<T: Decodable>(_ base: String, query: [URLQueryItem] = []) async -> T? {
-        guard var components = URLComponents(string: base) else { return nil }
-        if !query.isEmpty { components.queryItems = query }
-        guard let url = components.url,
-            let (data, response) = try? await URLSession.shared.data(from: url),
-            (response as? HTTPURLResponse)?.statusCode == 200
-        else { return nil }
-        return try? JSONDecoder().decode(T.self, from: data)
     }
 
     /// Decodes a preview (MP3 or AAC) with AVFoundation and mixes it to mono.
@@ -121,9 +77,9 @@ enum RhythmLookup {
     }
 }
 
-/// Rhythm maps by track ID, as JSON in Caches (they can be measured again).
+/// Rhythm maps by track ID, as JSON, kept with what is saved for offline.
 enum RhythmCache {
-    private static var folder: URL { URL.cachesDirectory.appending(path: "rhythm") }
+    private static var folder: URL { OfflineStore.folder.appending(path: "rhythm") }
 
     private static func file(_ trackID: String) -> URL {
         let name = SHA256.hash(data: Data(trackID.utf8)).prefix(12).map { String(format: "%02x", $0) }.joined()

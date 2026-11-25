@@ -40,6 +40,7 @@ enum GestureScheme: String, CaseIterable, Identifiable {
             ("swipe left", "next"), ("swipe right", "previous"),
             ("swipe up", "library"), ("swipe down", "queue"),
             ("two-finger tap", "settings"),
+            ("two-finger swipe", "lyrics / cover"),
         ]
         return lines
     }
@@ -52,6 +53,7 @@ enum GestureScheme: String, CaseIterable, Identifiable {
 enum SurfaceEvent {
     case tap(CGPoint)
     case twoFingerTap
+    case twoFingerSwipe
     case panChanged(CGSize)
     case panEnded(translation: CGSize, velocity: CGSize)
     case holdBegan(CGPoint)
@@ -77,7 +79,10 @@ struct GestureSurface: UIViewRepresentable {
         let hold = UILongPressGestureRecognizer(target: c, action: #selector(Coordinator.hold(_:)))
         hold.minimumPressDuration = 0.32
         hold.allowableMovement = 10
-        for r in [tap, two, pan, hold] { view.addGestureRecognizer(r) }
+        let swipe = UISwipeGestureRecognizer(target: c, action: #selector(Coordinator.twoFingerSwipe(_:)))
+        swipe.numberOfTouchesRequired = 2
+        swipe.direction = [.left, .right]
+        for r in [tap, two, pan, hold, swipe] { view.addGestureRecognizer(r) }
         return view
     }
 
@@ -95,6 +100,10 @@ struct GestureSurface: UIViewRepresentable {
 
         @objc func twoFingerTap(_ r: UITapGestureRecognizer) {
             onEvent(.twoFingerTap)
+        }
+
+        @objc func twoFingerSwipe(_ r: UISwipeGestureRecognizer) {
+            onEvent(.twoFingerSwipe)
         }
 
         @objc func pan(_ r: UIPanGestureRecognizer) {

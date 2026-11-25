@@ -1,10 +1,12 @@
 import Foundation
 
-/// The Spotify library through the Web API, with the token App Remote's
-/// login returned. Mirrors the terminal app (`crates/cw-sources/src/spotify.rs`),
+/// The Spotify library through the Web API, with `SpotifySource`'s login. Mirrors the terminal app (`crates/cw-sources/src/spotify.rs`),
 /// including Spotify's February 2026 Development Mode rules: playlist
 /// entries come from `/playlists/{id}/items` (under `item`, or `track`
 /// before), and only playlists you own or collaborate on can be listed.
+///
+/// Every listing is saved (`OfflineStore`), with its tracks' details, so the
+/// library still opens offline; rows then play through the Spotify app.
 @MainActor
 final class SpotifyLibrary: LibraryProvider {
     let name = "spotify"
@@ -13,7 +15,6 @@ final class SpotifyLibrary: LibraryProvider {
 
     private unowned let source: SpotifySource
     private var me: String?
-    private static let base = "https://api.spotify.com/v1"
     private static let maxRows = 1000
 
     init(source: SpotifySource) {
@@ -25,23 +26,51 @@ final class SpotifyLibrary: LibraryProvider {
         source.reauthorize()
     }
 
+    typealias Row = OfflineStore.Row
+
     // MARK: Listing
 
     func list(_ path: LibraryPath) async throws -> [LibraryItem] {
+        try await rows(path).map(item)
+    }
+
+    /// A listing's rows: from Spotify (and saved), or the saved copy when
+    /// offline.
+    func rows(_ path: LibraryPath) async throws -> [Row] {
+        if path.id == "root" { return Self.root }
+        if source.followingApp { return try saved(path) }
+        do {
+            let rows = try await fetch(path)
+            OfflineStore.shared.saveListing(path.id, rows)
+            return rows
+        } catch where error.isOffline {
+            return try saved(path)
+        }
+    }
+
+    private func saved(_ path: LibraryPath) throws -> [Row] {
+        guard let rows = OfflineStore.shared.listing(path.id) else {
+            throw LibraryError.message(
+                "Not saved for offline yet. Open it once while online, or turn on Save Ahead in Settings.")
+        }
+        return rows
+    }
+
+    private static let root: [Row] = [
+        Row(id: "liked", title: "liked songs", opensID: "liked", opensTitle: "liked songs"),
+        Row(id: "playlists", title: "playlists", opensID: "playlists", opensTitle: "playlists"),
+        Row(id: "albums", title: "albums", opensID: "albums", opensTitle: "albums"),
+    ]
+
+    private func fetch(_ path: LibraryPath) async throws -> [Row] {
         switch path.id {
-        case "root":
-            return [
-                LibraryItem(id: "liked", title: "liked songs", opens: LibraryPath(id: "liked", title: "liked songs")),
-                LibraryItem(id: "playlists", title: "playlists", opens: LibraryPath(id: "playlists", title: "playlists")),
-                LibraryItem(id: "albums", title: "albums", opens: LibraryPath(id: "albums", title: "albums")),
-            ]
         case "liked":
-            let tracks = try await all("/me/tracks").compactMap { track($0["track"]) }
+            let raw = try await all("/me/tracks").compactMap { $0["track"] }
+            remember(raw)
+            let tracks = raw.compactMap(track)
             let uris = tracks.map(\.uri)
-            var rows = [playAll(tracks.count) { try await self.play(uris: uris) }]
-            rows += tracks.enumerated().map { i, t in
-                row(t) { try await self.play(uris: Array(uris[i...])) }
-            }
+            var rows = [playAll(tracks.count, .tracks(uris))]
+            rows += tracks.enumerated().map { i, t in row(t, .tracks(Array(uris[i...]))) }
             return rows
         case "playlists":
             let mine = try await userID()
@@ -52,61 +81,77 @@ final class SpotifyLibrary: LibraryProvider {
                     let uri = a["uri"] as? String
                 else { return nil }
                 let name = a["name"] as? String ?? "Untitled"
-                return LibraryItem(
+                return Row(
                     id: "album:\(id)", title: name, subtitle: artists(a),
                     detail: (a["total_tracks"] as? Int).map(String.init),
-                    opens: LibraryPath(id: "album:\(id):\(uri)", title: name))
+                    opensID: "album:\(id):\(uri)", opensTitle: name)
             }
         default:
             // "playlist:ID:spotify:playlist:ID" or "album:ID:spotify:album:ID".
             let parts = path.id.split(separator: ":", maxSplits: 2).map(String.init)
             guard parts.count == 3 else { return [] }
             let (kind, id, uri) = (parts[0], parts[1], parts[2])
-            let tracks: [Track]
+            let raw: [Any]
             if kind == "playlist" {
-                tracks = try await all("/playlists/\(id)/items").compactMap { e in
-                    track(e["item"] is [String: Any] ? e["item"] : e["track"])
+                raw = try await all("/playlists/\(id)/items").compactMap { e in
+                    e["item"] is [String: Any] ? e["item"] : e["track"]
                 }
             } else {
-                tracks = try await all("/albums/\(id)/tracks").compactMap(track)
+                raw = try await all("/albums/\(id)/tracks")
             }
-            var rows = [playAll(tracks.count) { try await self.play(context: uri) }]
-            rows += tracks.map { t in row(t) { try await self.play(context: uri, offset: t.uri) } }
+            if kind == "playlist" { remember(raw) }
+            let tracks = raw.compactMap(track)
+            var rows = [playAll(tracks.count, .context(uri: uri, offset: nil, index: nil))]
+            rows += tracks.enumerated().map { i, t in row(t, .context(uri: uri, offset: t.uri, index: i)) }
             return rows
         }
     }
 
     func search(_ term: String) async throws -> [LibraryItem] {
+        if source.followingApp { return savedSearch(term) }
         var c = URLComponents()
         c.queryItems = [
             .init(name: "q", value: term), .init(name: "type", value: "track,album,playlist"),
             .init(name: "limit", value: "10"),
         ]
-        let json = try await get("/search?\(c.percentEncodedQuery ?? "")")
+        let json: [String: Any]
+        do {
+            json = try await get("/search?\(c.percentEncodedQuery ?? "")")
+        } catch where error.isOffline {
+            return savedSearch(term)
+        }
         func items(_ key: String) -> [[String: Any]] {
             ((json[key] as? [String: Any])?["items"] as? [Any])?.compactMap { $0 as? [String: Any] } ?? []
         }
-        let playlists: [LibraryItem] = items("playlists").compactMap { p in
+        let playlists: [Row] = items("playlists").compactMap { p in
             guard let uri = p["uri"] as? String else { return nil }
             let name = p["name"] as? String ?? "Untitled"
-            return LibraryItem(
-                id: uri, title: name, subtitle: "playlist",
-                play: { try await self.play(context: uri) })
+            return Row(id: uri, title: name, subtitle: "playlist", action: .context(uri: uri, offset: nil, index: nil))
         }
-        let albums: [LibraryItem] = items("albums").compactMap { a in
+        let albums: [Row] = items("albums").compactMap { a in
             guard let id = a["id"] as? String, let uri = a["uri"] as? String else { return nil }
             let name = a["name"] as? String ?? "Untitled"
-            return LibraryItem(
-                id: uri, title: name, subtitle: artists(a),
-                opens: LibraryPath(id: "album:\(id):\(uri)", title: name))
+            return Row(
+                id: uri, title: name, subtitle: artists(a), opensID: "album:\(id):\(uri)", opensTitle: name)
         }
-        let tracks: [LibraryItem] = items("tracks").compactMap(track).map { t in
-            row(t) { try await self.play(uris: [t.uri]) }
+        let tracks: [Row] = items("tracks").compactMap(track).map { row($0, .tracks([$0.uri])) }
+        return (tracks + albums + playlists).map(item)
+    }
+
+    /// Offline search: the saved songs.
+    private func savedSearch(_ term: String) -> [LibraryItem] {
+        OfflineStore.shared.search(term).map { r in
+            item(Row(
+                id: r.id, title: r.title, subtitle: r.artist,
+                detail: r.duration.map { timeText($0) }, action: .tracks([r.id]), trackURI: r.id))
         }
-        return tracks + albums + playlists
     }
 
     func upNext() async throws -> QueueSnapshot {
+        if source.followingApp {
+            let current = source.nowPlaying.map { QueueSnapshot.Entry(id: $0.trackID, title: $0.title, subtitle: $0.artist) }
+            return QueueSnapshot(current: current, upcoming: [], note: "Spotify's queue can't be read offline.")
+        }
         let json = try await get("/me/player/queue")
         func entry(_ v: Any?) -> QueueSnapshot.Entry? {
             guard let t = track(v) else { return nil }
@@ -118,7 +163,7 @@ final class SpotifyLibrary: LibraryProvider {
 
     // MARK: Rows
 
-    private func playlistRow(_ p: [String: Any], mine: String) -> LibraryItem? {
+    private func playlistRow(_ p: [String: Any], mine: String) -> Row? {
         guard let id = p["id"] as? String, let uri = p["uri"] as? String else { return nil }
         let name = p["name"] as? String ?? "Untitled"
         let ownerInfo = p["owner"] as? [String: Any] ?? [:]
@@ -128,15 +173,16 @@ final class SpotifyLibrary: LibraryProvider {
         let items = p["items"] as? [String: Any]
         let tracks = p["tracks"] as? [String: Any]
         let total: Int? = (items?["total"] as? Int) ?? (tracks?["total"] as? Int)
-        var row = LibraryItem(
+        var row = Row(
             id: "playlist:\(id)", title: name,
             subtitle: owner == mine ? nil : "by \(ownerName)",
             detail: total.map { String($0) })
         if readable {
-            row.opens = LibraryPath(id: "playlist:\(id):\(uri)", title: name)
+            row.opensID = "playlist:\(id):\(uri)"
+            row.opensTitle = name
         } else {
             // Others' playlists can be played but not listed.
-            row.play = { [weak self] in try await self?.play(context: uri) }
+            row.action = .context(uri: uri, offset: nil, index: nil)
         }
         return row
     }
@@ -158,46 +204,56 @@ final class SpotifyLibrary: LibraryProvider {
             artists: artists(t) ?? show, durationMS: t["duration_ms"] as? Int)
     }
 
+    /// Saves the tracks' details (cover URL, ISRC) for offline.
+    private func remember(_ raw: [Any]) {
+        for v in raw {
+            guard let t = v as? [String: Any], !(t["is_local"] as? Bool ?? false),
+                let uri = t["uri"] as? String, uri.hasPrefix("spotify:track:")
+            else { continue }
+            let album = t["album"] as? [String: Any] ?? [:]
+            let images = (album["images"] as? [[String: Any]]) ?? []
+            let cover = images.max { ($0["width"] as? Int ?? 0) < ($1["width"] as? Int ?? 0) }
+            OfflineStore.shared.remember(OfflineStore.Record(
+                id: uri, title: t["name"] as? String ?? "Untitled", artist: artists(t) ?? "",
+                album: album["name"] as? String ?? "",
+                duration: (t["duration_ms"] as? Double).map { $0 / 1000 },
+                isrc: (t["external_ids"] as? [String: Any])?["isrc"] as? String,
+                artworkURL: cover?["url"] as? String))
+        }
+    }
+
     private func artists(_ v: [String: Any]) -> String? {
         let names = (v["artists"] as? [Any])?.compactMap { ($0 as? [String: Any])?["name"] as? String } ?? []
         return names.isEmpty ? nil : names.joined(separator: ", ")
     }
 
-    private func row(_ t: Track, play: @escaping @MainActor () async throws -> Void) -> LibraryItem {
-        LibraryItem(
+    private func row(_ t: Track, _ action: Row.Action) -> Row {
+        Row(
             id: UUID().uuidString, title: t.name, subtitle: t.artists,
             detail: t.durationMS.map { timeText(TimeInterval($0) / 1000) },
-            play: play,
-            enqueue: { [weak self] _ in try await self?.source.enqueue(t.uri) })
+            action: action, trackURI: t.uri)
     }
 
-    private func playAll(_ n: Int, _ play: @escaping @MainActor () async throws -> Void) -> LibraryItem {
-        LibraryItem(id: "play-all", title: "play all", detail: "\(n)", play: play)
+    private func playAll(_ n: Int, _ action: Row.Action) -> Row {
+        Row(id: "play-all", title: "play all", detail: "\(n)", action: action)
     }
 
-    // MARK: Playback
-
-    private func play(context: String, offset: String? = nil) async throws {
-        var body: [String: Any] = ["context_uri": context]
-        if let offset { body["offset"] = ["uri": offset] }
-        try await startPlayback(body, fallback: offset ?? context)
-    }
-
-    private func play(uris: [String]) async throws {
-        guard let first = uris.first else { return }
-        try await startPlayback(["uris": Array(uris.prefix(100))], fallback: first)
-    }
-
-    /// `PUT /me/player/play`; with no active device, App Remote plays on
-    /// this iPhone instead (without the position in the list).
-    private func startPlayback(_ body: [String: Any], fallback: String) async throws {
-        let (status, _) = try await send("PUT", "/me/player/play", body: body)
-        switch status {
-        case 200..<300: return
-        case 404: try await source.play(uri: fallback)
-        case 403: throw LibraryError.message("Spotify Premium is needed to start playback from here.")
-        default: throw LibraryError.message("Spotify said \(status).")
+    /// A saved row with its actions.
+    private func item(_ r: Row) -> LibraryItem {
+        var item = LibraryItem(id: r.id, title: r.title, subtitle: r.subtitle, detail: r.detail)
+        if let id = r.opensID { item.opens = LibraryPath(id: id, title: r.opensTitle ?? r.title) }
+        switch r.action {
+        case .context(let uri, let offset, let index)?:
+            item.play = { [weak self] in try await self?.source.play(context: uri, offset: offset, index: index) }
+        case .tracks(let uris)?:
+            item.play = { [weak self] in try await self?.source.play(uris: uris) }
+        case nil:
+            break
         }
+        if let uri = r.trackURI {
+            item.enqueue = { [weak self] _ in try await self?.source.enqueue(uri) }
+        }
+        return item
     }
 
     // MARK: HTTP
@@ -234,19 +290,9 @@ final class SpotifyLibrary: LibraryProvider {
     }
 
     private func send(_ method: String, _ path: String, body: [String: Any]?) async throws -> (Int, Data) {
-        guard let token = source.webToken else { throw LibraryError.needsLogin }
-        guard let url = URL(string: Self.base + path) else { throw LibraryError.message("Bad request.") }
-        var request = URLRequest(url: url)
-        request.httpMethod = method
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        if let body {
-            request.httpBody = try JSONSerialization.data(withJSONObject: body)
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        }
-        let (data, response) = try await URLSession.shared.data(for: request)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        // 401: expired. 403 on reads: the login lacks the library scopes.
-        if status == 401 || (status == 403 && method == "GET") { throw LibraryError.needsLogin }
+        let (status, data) = try await source.call(method, path, body: body)
+        // 403 on reads: the login lacks the library scopes.
+        if status == 403 && method == "GET" { throw LibraryError.needsLogin }
         return (status, data)
     }
 }

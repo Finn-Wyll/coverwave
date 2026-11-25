@@ -90,8 +90,20 @@ final class CoverRenderer {
     /// Tick used for still frames (motion off).
     private static let stillTick = UInt32.max
 
+    /// Lyrics to draw over the cover for one frame.
+    struct LyricsInput {
+        let sheet: LyricSheet
+        let position: TimeInterval
+        let duration: TimeInterval?
+        let style: LyricStyleKind
+        let scroll: LyricScrollKind
+        let size: LyricSizeKind
+        let paint: LyricPaintKind
+    }
+
     func frame(
         cover: AnalysedCover?, metrics: CellMetrics, mode: ArtMode, animate: Bool, date: Date,
+        lyrics: (Date) -> LyricsInput? = { _ in nil },
         levels: (Date) -> AudioLevels
     ) -> CellFrame {
         let key = Key(cover: cover.map { ObjectIdentifier($0) }, metrics: metrics, mode: mode)
@@ -104,9 +116,22 @@ final class CoverRenderer {
                     cellAspect: metrics.cellAspect, mode: mode, background: Theme.pageCore)
             }
         }
-        let tick = animate ? UInt32(truncatingIfNeeded: Int(date.timeIntervalSince(start) * 30)) : Self.stillTick
+        let words = animator == nil ? nil : lyrics(date)
+        // Lyrics scroll even with motion off, so they need a moving clock.
+        let tick =
+            animate || words != nil
+            ? UInt32(truncatingIfNeeded: Int(date.timeIntervalSince(start) * 30)) : Self.stillTick
         if tick == lastTick, let last { return last }
         lastTick = tick
+        if let a = animator, let w = words {
+            let frame = a.frameWithLyrics(
+                frame: tick, audio: animate ? levels(date) : AudioLevels(
+                    bands: Array(repeating: 0, count: 6), level: 0, onset: 0, onsetCount: 0),
+                lyrics: w.sheet, position: w.position, duration: w.duration,
+                style: w.style, scroll: w.scroll, size: w.size, paint: w.paint, animate: animate)
+            last = frame
+            return frame
+        }
         let frame: CellFrame
         switch (animator, animate) {
         case (let a?, true): frame = a.frame(frame: tick, audio: levels(date))
@@ -136,6 +161,7 @@ final class CellPainter {
         if let font, size == fontSize { return font }
         let f = UIFont.monospacedSystemFont(ofSize: size, weight: .semibold) as CTFont
         font = f
+        extraGlyphs.removeAll()
         fontSize = size
         ascent = CTFontGetAscent(f)
         descent = CTFontGetDescent(f)
@@ -179,16 +205,23 @@ final class CellPainter {
         var runs: [UInt32: ([CGGlyph], [CGPoint])] = [:]
         let baseline = (m.cellHeight - ascent - descent) / 2 + ascent
         var i = 0
+        // Lyrics bring characters beyond ASCII (accents, curly quotes,
+        // other scripts): drawn one by one in a font that has them.
+        var others: [(CTFont, CGGlyph, CGPoint, UInt32)] = []
         for scalar in frame.glyphs.unicodeScalars {
             defer { i += 1 }
             let v = scalar.value
-            guard v > 32, v < 128, i < frame.fg.count else { continue }
+            guard v > 32, i < frame.fg.count else { continue }
             let x = m.origin.x + CGFloat(i % cols) * m.cellWidth
             // Flipped below: y measured up from the bottom edge.
             let y = size.height - (m.origin.y + CGFloat(i / cols) * m.cellHeight + baseline)
             let key = frame.fg[i] & 0xFCFCFC
-            runs[key, default: ([], [])].0.append(glyphs[Int(v)])
-            runs[key, default: ([], [])].1.append(CGPoint(x: x, y: y))
+            if v < 128 {
+                runs[key, default: ([], [])].0.append(glyphs[Int(v)])
+                runs[key, default: ([], [])].1.append(CGPoint(x: x, y: y))
+            } else if let (f, g) = glyph(for: scalar, font: font) {
+                others.append((f, g, CGPoint(x: x, y: y), key))
+            }
         }
         cg.saveGState()
         cg.textMatrix = .identity
@@ -202,7 +235,36 @@ final class CellPainter {
                 }
             }
         }
+        for (f, g, p, packed) in others {
+            cg.setFillColor(color(packed))
+            var glyph = g
+            var point = p
+            CTFontDrawGlyphs(f, &glyph, &point, 1, cg)
+        }
         cg.restoreGState()
+    }
+
+    /// Fonts and glyphs for characters beyond ASCII, found once each: SF
+    /// Mono when it has them, else the system's fallback for that text.
+    private var extraGlyphs: [UInt32: (CTFont, CGGlyph)?] = [:]
+
+    private func glyph(for scalar: Unicode.Scalar, font: CTFont) -> (CTFont, CGGlyph)? {
+        if let found = extraGlyphs[scalar.value] { return found }
+        let units = Array(String(scalar).utf16)
+        var gs = [CGGlyph](repeating: 0, count: units.count)
+        var found: (CTFont, CGGlyph)?
+        if CTFontGetGlyphsForCharacters(font, units, &gs, units.count), gs[0] != 0 {
+            found = (font, gs[0])
+        } else {
+            let text = String(scalar) as CFString
+            let fallback = CTFontCreateForString(font, text, CFRange(location: 0, length: units.count))
+            if CTFontGetGlyphsForCharacters(fallback, units, &gs, units.count), gs[0] != 0 {
+                found = (fallback, gs[0])
+            }
+        }
+        if extraGlyphs.count > 4096 { extraGlyphs.removeAll() }
+        extraGlyphs[scalar.value] = .some(found)
+        return found
     }
 }
 
@@ -216,12 +278,20 @@ struct CoverCanvas: View {
         let cover = model.cover
         let mode = model.settings.artMode
         let detail = model.settings.artDetail
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !animate)) { timeline in
+        let lyricsOn = model.settings.showLyrics && model.lyricSheet != nil
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !animate && !lyricsOn)) { timeline in
             Canvas(opaque: true, rendersAsynchronously: false) { context, size in
                 let metrics = CellMetrics(size: size, detail: detail)
                 let frame = renderer.frame(
                     cover: cover, metrics: metrics, mode: mode, animate: animate,
-                    date: timeline.date
+                    date: timeline.date,
+                    lyrics: { date in
+                        guard lyricsOn, let sheet = model.lyricSheet, let np = model.nowPlaying else { return nil }
+                        return .init(
+                            sheet: sheet, position: np.position(at: date), duration: np.duration,
+                            style: model.settings.lyricStyle, scroll: model.settings.lyricScroll,
+                            size: model.settings.lyricSize, paint: model.settings.lyricPaint)
+                    }
                 ) { model.levels(at: $0) }
                 context.withCGContext { cg in
                     renderer.painter.draw(frame, metrics: metrics, in: cg, size: size)

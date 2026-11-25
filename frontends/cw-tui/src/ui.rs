@@ -55,7 +55,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::Library => draw_library(f, app, main),
     }
     if app.mode == Mode::Art && app.show_lyrics {
-        draw_lyrics(f, app, main);
+        draw_lyrics_status(f, app, main);
     }
     draw_hud(f, app, hud);
     let bottom = Rect {
@@ -95,6 +95,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         DebugPage::Off => {}
         DebugPage::Stats => draw_debug(f, app, main),
         DebugPage::Recipe => draw_recipe(f, app, main),
+    }
+    if app.settings_menu.open {
+        draw_settings(f, app, main);
+    }
+    if let Some(i) = app.source_picker {
+        draw_source_picker(f, app, main, i);
     }
     if app.show_help {
         draw_help(f, main);
@@ -177,6 +183,7 @@ fn draw_art(f: &mut Frame, app: &mut App, area: Rect) {
                 }
                 app.prev_out = None;
                 app.art_cache = Some(ArtCache {
+                    art,
                     entry: entry.id,
                     width: w,
                     height: h,
@@ -186,27 +193,39 @@ fn draw_art(f: &mut Frame, app: &mut App, area: Rect) {
                     scene,
                 });
             }
-            match app.art_cache.as_ref() {
-                None => CellGrid::new(0, 0),
-                Some(c) if !app.motion => c.base.clone(),
-                Some(c) => {
-                    let age = app.frame.wrapping_sub(app.fade_start);
-                    let t = (age as f32 / FADE_FRAMES as f32).min(1.0);
-                    // Eased fade-in, times the pause/resume settle level.
-                    let fade = t * t * (3.0 - 2.0 * t) * app.motion_level;
-                    let input = cw_render::Input {
-                        frame: app.frame,
-                        audio: &app.audio,
-                        fade,
-                    };
-                    let out = cw_render::render(&c.scene, input);
-                    let out = match app.prev_out.take() {
-                        Some(prev) => cw_render::limit_changes(&c.scene, &prev, out),
-                        None => out,
-                    };
-                    let grid = out.grid.clone();
-                    app.prev_out = Some(out);
-                    grid
+            // Lyrics replace the cover's square: the words are drawn into
+            // the art and the cover's recipe runs over them.
+            let lyrics_on = app.show_lyrics && app.current_lyrics().is_some();
+            if lyrics_on != app.lyrics_scene_on {
+                app.lyrics_scene_on = lyrics_on;
+                app.prev_out = None;
+            }
+            if lyrics_on && let Some(grid) = lyric_frame(app, &entry) {
+                grid
+            } else {
+                match app.art_cache.as_ref() {
+                    None => CellGrid::new(0, 0),
+                    Some(c) if !app.motion => c.base.clone(),
+                    Some(c) => {
+                        let scene = &c.scene;
+                        let age = app.frame.wrapping_sub(app.fade_start);
+                        let t = (age as f32 / FADE_FRAMES as f32).min(1.0);
+                        // Eased fade-in, times the pause/resume settle level.
+                        let fade = t * t * (3.0 - 2.0 * t) * app.motion_level;
+                        let input = cw_render::Input {
+                            frame: app.frame,
+                            audio: &app.audio,
+                            fade,
+                        };
+                        let out = cw_render::render(scene, input);
+                        let out = match app.prev_out.take() {
+                            Some(prev) => cw_render::limit_changes(scene, &prev, out),
+                            None => out,
+                        };
+                        let grid = out.grid.clone();
+                        app.prev_out = Some(out);
+                        grid
+                    }
                 }
             }
         }
@@ -240,59 +259,74 @@ fn draw_art(f: &mut Frame, app: &mut App, area: Rect) {
     app.prev_art = Some(grid);
 }
 
-/// Three lyric lines (previous, current, next) centred above the HUD. They
-/// are drawn after the art, so motion never runs through them.
-fn draw_lyrics(f: &mut Frame, app: &App, main: Rect) {
-    let Some(lyrics) = app.current_lyrics() else {
-        return;
+/// The lyrics view for this frame: the words drawn into the cover's
+/// square in its colours, then the cover's own recipe run over them so
+/// every effect acts on the letters (`cw_render::lyrics`). `None` when there
+/// is no cover to stand in for.
+fn lyric_frame(app: &App, entry: &crate::cover::CoverEntry) -> Option<CellGrid> {
+    let lyrics = app.current_lyrics()?;
+    let cache = app.art_cache.as_ref()?;
+    let palette = &entry.palette;
+    // The lightest palette colour, eased toward plain text so it reads.
+    let light = palette
+        .colors
+        .iter()
+        .max_by_key(|c| c.0 as u32 + c.1 as u32 + c.2 as u32)
+        .copied()
+        .unwrap_or(Rgb(196, 204, 214));
+    let colors = cw_render::lyrics::LyricColors {
+        accent: palette.accent,
+        text: light.lerp(Rgb(222, 226, 232), 0.5),
+        background: BG_RGB,
     };
-    let Some(snap) = app.snapshot.as_ref() else {
-        return;
-    };
-    let n = lyrics.lines.len();
-    if n == 0 || main.height < 6 {
-        return;
+    let (pos, duration) = app.lyric_clock();
+    let base = cw_render::lyrics::lyric_base(
+        &cache.base,
+        cache.art,
+        app.cell_aspect,
+        lyrics,
+        pos,
+        duration,
+        app.lyric_view,
+        colors,
+        &app.audio,
+    );
+    if !app.motion {
+        return Some(base);
     }
-    let pos = snap.position_secs + app.lyrics_offset;
-    let current = if lyrics.synced {
-        lyrics.index_at(pos)
-    } else {
-        // Unsynced: scroll evenly through the song.
-        snap.duration_secs
-            .filter(|d| *d > 0.0)
-            .map(|d| ((pos / d).clamp(0.0, 0.999) * n as f64) as usize)
+    let ramp = entry.recipe.recipe.global.charset.ramp();
+    let scene = cw_render::lyrics::lyric_scene(&entry.recipe.recipe, base, cache.art, ramp);
+    let input = cw_render::Input {
+        frame: app.frame,
+        audio: &app.audio,
+        fade: app.motion_level,
     };
-    let rows = [
-        current.and_then(|i| i.checked_sub(1)),
-        current,
-        current.map_or(Some(0), |i| (i + 1 < n).then_some(i + 1)),
-    ];
-    let top = main.bottom().saturating_sub(4);
-    for (k, idx) in rows.iter().enumerate() {
-        let Some(i) = idx else { continue };
-        let text = lyrics.lines[*i].text.trim();
-        if text.is_empty() {
-            continue;
-        }
-        let text = fit(text, main.width.saturating_sub(4) as usize);
-        let w = text.chars().count() as u16 + 2;
-        let area = Rect {
-            x: main.x + main.width.saturating_sub(w) / 2,
-            y: top + k as u16,
-            width: w.min(main.width),
-            height: 1,
-        };
-        let style = if k == 1 {
-            Style::new().fg(FG).add_modifier(Modifier::BOLD)
-        } else {
-            Style::new().fg(DIM)
-        };
-        f.render_widget(Clear, area);
-        f.render_widget(
-            Paragraph::new(Span::styled(format!(" {text} "), style)).style(Style::new().bg(BG)),
-            area,
-        );
-    }
+    Some(cw_render::render(&scene, input).grid)
+}
+
+/// While the lyrics view is on but has nothing to show, says why.
+fn draw_lyrics_status(f: &mut Frame, app: &App, main: Rect) {
+    use crate::lyrics_store::Status;
+    let msg = match app.lyrics.status() {
+        Status::Found(_) => return,
+        Status::Searching => "looking up lyrics",
+        Status::Instrumental => "instrumental",
+        Status::NotFound => "no lyrics found for this song",
+        Status::Idle => "lyrics show here when something plays",
+    };
+    let w = (msg.len() as u16 + 2).min(main.width);
+    let area = Rect {
+        x: main.x + main.width.saturating_sub(w) / 2,
+        y: main.bottom().saturating_sub(3),
+        width: w,
+        height: 1,
+    };
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(Span::styled(format!(" {msg} "), Style::new().fg(DIM)))
+            .style(Style::new().bg(BG)),
+        area,
+    );
 }
 
 /// Copies a `CellGrid` into the ratatui buffer.
@@ -305,6 +339,11 @@ impl Widget for GridWidget<'_> {
             for x in 0..area.width.min(g.width()) {
                 let Some(cell) = g.get(x, y) else { continue };
                 let target = &mut buf[(area.x + x, area.y + y)];
+                // Covered by the wide character before it.
+                if cell.ch == cw_render::lyrics::WIDE_CONTINUATION {
+                    target.set_symbol("");
+                    continue;
+                }
                 target.set_char(cell.ch).set_fg(color(cell.fg));
                 if let Some(bg) = cell.bg {
                     target.set_bg(color(bg));
@@ -470,6 +509,10 @@ fn draw_remote_library(f: &mut Frame, app: &mut App, area: Rect) {
             )),
             Line::from(dim(fit(n.artist.as_deref().unwrap_or(""), w))),
             Line::from(dim(fit(n.album.as_deref().unwrap_or(""), w))),
+            Line::from(Span::styled(
+                fit(&format!("on {}", n.device.as_deref().unwrap_or("?")), w),
+                Style::new().fg(accent),
+            )),
         ],
         None => vec![Line::from(dim("nothing playing yet"))],
     };
@@ -682,6 +725,8 @@ fn draw_hud(f: &mut Frame, app: &App, area: Rect) {
         let hints = Line::from(vec![
             key("tab"),
             dim(" library   "),
+            key(","),
+            dim(" settings   "),
             key("?"),
             dim(" keys   "),
             key("q"),
@@ -806,6 +851,15 @@ fn draw_remote_hud(f: &mut Frame, app: &App, area: Rect) {
         && rest > 6
     {
         left.push(dim(fit(&format!("  {artist}"), rest)));
+    }
+    let used: usize = left.iter().map(|s| s.width()).sum();
+    if let Some(device) = &now.device
+        && (l.width as usize).saturating_sub(used) > device.chars().count() + 6
+    {
+        left.push(Span::styled(
+            format!("  on {device}"),
+            Style::new().fg(accent),
+        ));
     }
     if let Some(e) = &state.error
         && l.width > 60
@@ -1082,20 +1136,131 @@ const KEYS: &[(&str, &str)] = &[
     ("a", "add to queue"),
     ("bksp esc", "back"),
     ("P", "save queue as playlist"),
-    ("S", "source: local, Spotify, Apple Music"),
+    ("S", "choose a source"),
     ("L", "log in to Spotify"),
-    ("l", "lyrics on / off"),
+    ("l", "lyrics instead of the cover"),
     ("[  ]", "lyrics earlier / later"),
     ("c", "cover style (palette, true, duo)"),
     ("m", "motion on / off"),
     ("up  down", "move in library (or j k)"),
     ("D", "debug overlay: stats, recipe, off"),
     ("R", "reload the cover's recipe"),
+    (",", "settings"),
     (ZOOM_OUT_KEY, "smaller font: finer, sharper art"),
     ("ctrl-l", "redraw the screen"),
     ("?", "close this help"),
     ("q", "quit"),
 ];
+
+/// The source picker (`S`): every source with what it is doing, the
+/// highlighted one marked in the accent, the current one labelled.
+fn draw_source_picker(f: &mut Frame, app: &App, main: Rect, highlighted: usize) {
+    let accent = accent(app);
+    let w = 56.min(main.width);
+    let inner_w = w.saturating_sub(4) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, kind) in app.sources.available().iter().enumerate() {
+        let on = i == highlighted;
+        let current = *kind == app.sources.active;
+        let name = kind.name().to_lowercase();
+        let tag = if current { "  (now)" } else { "" };
+        lines.push(Line::from(vec![
+            Span::styled(if on { "> " } else { "  " }, Style::new().fg(accent)),
+            Span::styled(
+                format!("{name}{tag}"),
+                if on {
+                    Style::new().fg(accent).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new().fg(FG)
+                },
+            ),
+        ]));
+        lines.push(Line::from(dim(fit(
+            &format!("    {}", app.source_status(*kind)),
+            inner_w,
+        ))));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(dim(fit(
+        "up/down choose   enter switch   esc close",
+        inner_w,
+    ))));
+    let h = (lines.len() as u16 + 2).min(main.height);
+    let area = Rect {
+        x: main.x + (main.width - w) / 2,
+        y: main.y + main.height.saturating_sub(h) / 2,
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(panel("source"))
+            .style(Style::new().bg(BG)),
+        area,
+    );
+}
+
+/// The settings menu (`,`): sections of rows, the chosen one marked in the
+/// cover's accent with its value between arrows; what it does and the keys
+/// underneath.
+fn draw_settings(f: &mut Frame, app: &App, main: Rect) {
+    use crate::settings_menu::SECTIONS;
+    let accent = accent(app);
+    let w = 60.min(main.width);
+    let inner_w = w.saturating_sub(4) as usize;
+    let selected = app.settings_menu.selected();
+    let mut lines: Vec<Line> = Vec::new();
+    for (k, (name, items)) in SECTIONS.iter().enumerate() {
+        if k > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled(
+            name.to_string(),
+            Style::new().fg(DIM).add_modifier(Modifier::BOLD),
+        )));
+        for item in items.iter() {
+            let on = *item == selected;
+            let value = app.setting_value(*item);
+            let value = if on { format!("< {value} >") } else { value };
+            let label = item.label();
+            let gap = inner_w.saturating_sub(2 + label.chars().count() + value.chars().count());
+            lines.push(Line::from(vec![
+                Span::styled(if on { "> " } else { "  " }, Style::new().fg(accent)),
+                Span::styled(
+                    label,
+                    if on {
+                        Style::new().fg(FG).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::new().fg(FG)
+                    },
+                ),
+                Span::raw(" ".repeat(gap)),
+                Span::styled(value, Style::new().fg(if on { accent } else { DIM })),
+            ]));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(dim(fit(selected.help(), inner_w))));
+    lines.push(Line::from(dim(fit(
+        "up/down choose   left/right or enter change   esc close",
+        inner_w,
+    ))));
+    let h = (lines.len() as u16 + 2).min(main.height);
+    let area = Rect {
+        x: main.x + (main.width - w) / 2,
+        y: main.y + main.height.saturating_sub(h) / 2,
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(panel("settings"))
+            .style(Style::new().bg(BG)),
+        area,
+    );
+}
 
 /// The art fills the terminal, so a smaller terminal font means more
 /// characters per cover. Only the terminal app can change its font.

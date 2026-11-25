@@ -17,6 +17,8 @@ enum Haptics {
 struct HUD: View {
     let track: NowPlaying?
     let sourceName: String
+    /// The device playing, when it is not this iPhone ("MacBook Pro").
+    var elsewhere: String? = nil
     /// A one-line status: the last action, or why nothing is playing.
     let status: String?
     /// While scrubbing: the fraction under the finger.
@@ -42,6 +44,11 @@ struct HUD: View {
                     Text([track.artist, track.album].filter { !$0.isEmpty }.joined(separator: " / "))
                         .font(Term.font(13))
                         .foregroundStyle(Term.dim)
+                    if let elsewhere {
+                        Text("on \(elsewhere.lowercased()), swipe down to change")
+                            .font(Term.font(12))
+                            .foregroundStyle(.tint)
+                    }
                     if scrub != nil {
                         Text(timeText(shown * duration))
                             .font(Term.font(40, .light))

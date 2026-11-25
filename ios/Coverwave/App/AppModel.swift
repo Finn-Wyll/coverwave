@@ -35,27 +35,42 @@ final class AppModel {
     @ObservationIgnored private var pending: Set<String> = []
 
 
-    var active: (any MusicSource)? {
-        switch activeKind {
-        case .spotify: spotify
-        case .appleMusic: appleMusic
-        case nil: nil
-        }
+    var active: (any MusicSource)? { activeKind.map(source) }
+
+    /// Offline mode: nothing touches the internet.
+    var isOfflineMode: Bool { activeKind == .offline }
+
+    /// Whether lookups (genre, lyrics, rhythm) may use the internet.
+    private var networkAllowed: Bool { !isOfflineMode && NetworkMonitor.shared.isOnline }
+
+    /// Saves ahead for offline listening.
+    @ObservationIgnored private(set) lazy var saver = OfflineSaver(model: self)
+
+    /// Spotify's library (also what the saver lists).
+    var spotifyLibrary: SpotifyLibrary? {
+        guard spotify.isConfigured else { return nil }
+        if let b = browsers[.spotify], let lib = b.provider as? SpotifyLibrary { return lib }
+        let b = LibraryBrowser(provider: SpotifyLibrary(source: spotify))
+        browsers[.spotify] = b
+        return b.provider as? SpotifyLibrary
     }
 
-    var nowPlaying: NowPlaying? { active?.nowPlaying }
+    /// What is playing, with a looked-up genre if its source gave none.
+    var nowPlaying: NowPlaying? { withGenre(active?.nowPlaying) }
 
     @ObservationIgnored private var browsers: [SourceKind: LibraryBrowser] = [:]
 
     /// Library browsing for the active source (kept per source, so its
     /// place and cache survive closing the panel).
     var library: LibraryBrowser? {
-        guard let kind = activeKind else { return nil }
+        guard var kind = activeKind else { return nil }
+        // Offline browses the same (saved) Spotify library.
+        if kind == .offline { kind = .spotify }
         if let b = browsers[kind] { return b }
         let provider: any LibraryProvider =
             switch kind {
-            case .spotify: SpotifyLibrary(source: spotify)
             case .appleMusic: AppleMusicLibrary()
+            default: SpotifyLibrary(source: spotify)
             }
         let b = LibraryBrowser(provider: provider)
         browsers[kind] = b
@@ -67,18 +82,25 @@ final class AppModel {
     var isFollowing: Bool { active?.status == .connected }
 
     init() {
-        spotify.onChange = { [weak self] np in self?.trackChanged(np, from: .spotify) }
+        spotify.onChange = { [weak self] np in
+            guard let self else { return }
+            self.trackChanged(np, from: self.activeKind == .offline ? .offline : .spotify)
+            if self.spotify.status == .connected { self.saver.kick() }
+        }
         appleMusic.onChange = { [weak self] np in self?.trackChanged(np, from: .appleMusic) }
+        NetworkMonitor.shared.onChange.append { [weak self] in self?.saver.kick() }
     }
 
     func start() async {
         if let last = settings.lastSource {
             activeKind = last
+            spotify.forceOffline = last == .offline
             source(last).resume()
         }
         await core.loadIfPresent()
-        if case .missing = core.modelState { await core.download() }
+        if case .missing = core.modelState, !isOfflineMode { await core.download() }
         modelBecameReady()
+        saver.kick()
     }
 
     /// Downloads the cover-analysis model (from Settings, after a failure).
@@ -89,7 +111,7 @@ final class AppModel {
 
     func source(_ kind: SourceKind) -> any MusicSource {
         switch kind {
-        case .spotify: spotify
+        case .spotify, .offline: spotify
         case .appleMusic: appleMusic
         }
     }
@@ -100,22 +122,86 @@ final class AppModel {
         if let current = activeKind, current != kind { source(current).disconnect() }
         activeKind = kind
         settings.lastSource = kind
+        spotify.forceOffline = kind == .offline
+        if kind == .offline { saver.stop() }
         source(kind).connect()
         trackChanged(source(kind).nowPlaying, from: kind)
     }
 
-    func handleOpenURL(_ url: URL) {
-        _ = spotify.handle(url: url)
-    }
-
     func sceneBecameActive() {
         active?.resume()
+        saver.kick()
     }
 
     // MARK: Covers
 
-    private func trackChanged(_ np: NowPlaying?, from kind: SourceKind) {
+    /// Genres found for songs whose source gave none (nil: none found).
+    @ObservationIgnored private var lookedUpGenres: [String: String?] = [:]
+
+    /// The track with a looked-up genre when its source had none.
+    private func withGenre(_ np: NowPlaying?) -> NowPlaying? {
+        guard var np, np.genre == nil, let g = lookedUpGenres[np.trackID] ?? nil else { return np }
+        np.genre = g
+        return np
+    }
+
+    private func lookUpGenre(_ np: NowPlaying, from kind: SourceKind) {
+        guard np.genre == nil, lookedUpGenres[np.trackID] == nil else { return }
+        lookedUpGenres[np.trackID] = .some(nil)
+        if let saved = OfflineStore.shared.record(np.trackID), saved.genreChecked || !networkAllowed {
+            lookedUpGenres[np.trackID] = .some(saved.genre)
+            return
+        }
+        guard networkAllowed else { return }
+        Task { [weak self] in
+            let genre = await GenreLookup.genre(for: np)
+            guard let self else { return }
+            self.lookedUpGenres[np.trackID] = .some(genre)
+            OfflineStore.shared.update(np.trackID) {
+                $0.genre = $0.genre ?? genre
+                $0.genreChecked = true
+            }
+            // Rebuild the cover's recipe for its genre.
+            if genre != nil, self.activeKind == kind, self.source(kind).nowPlaying?.trackID == np.trackID {
+                self.trackChanged(self.source(kind).nowPlaying, from: kind)
+            }
+        }
+    }
+
+    // MARK: Lyrics
+
+    /// The current song's lyrics and where the lookup stands.
+    private(set) var lyrics: (trackID: String, sheet: LyricSheet?, status: LyricsStatus)?
+
+    /// Lyrics for the song playing now, if found.
+    var lyricSheet: LyricSheet? {
+        guard let l = lyrics, l.trackID == nowPlaying?.trackID else { return nil }
+        return l.sheet
+    }
+
+    var lyricsStatus: LyricsStatus? {
+        guard let l = lyrics, l.trackID == nowPlaying?.trackID else { return nil }
+        return l.status
+    }
+
+    private func lookUpLyrics(_ np: NowPlaying) {
+        guard lyrics?.trackID != np.trackID else { return }
+        lyrics = (np.trackID, nil, .searching)
+        let network = networkAllowed
+        Task { [weak self] in
+            let (sheet, status) = await LyricsLookup.lyrics(for: np, network: network)
+            guard let self, self.lyrics?.trackID == np.trackID else { return }
+            self.lyrics = (np.trackID, sheet, status)
+        }
+    }
+
+    private func trackChanged(_ raw: NowPlaying?, from kind: SourceKind) {
         guard kind == activeKind else { return }
+        if let raw {
+            lookUpGenre(raw, from: kind)
+            lookUpLyrics(raw)
+        }
+        let np = withGenre(raw)
         guard let np else {
             coverTask?.cancel()
             coverFor = nil
@@ -170,8 +256,9 @@ final class AppModel {
         rhythms[np.trackID] = .some(nil)
         pending.insert(np.trackID)
         refreshTempoText()
+        let network = networkAllowed
         Task { [weak self] in
-            let rhythm = await RhythmLookup.rhythm(for: np)
+            let rhythm = await RhythmLookup.rhythm(for: np, network: network)
             self?.rhythms[np.trackID] = .some(rhythm)
             self?.pending.remove(np.trackID)
             self?.refreshTempoText()

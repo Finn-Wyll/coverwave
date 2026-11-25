@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+cw-core.workspace = true
 cw-audio.workspace = true
 lofty = "0.25.5"
 nucleo-matcher = "0.3"
