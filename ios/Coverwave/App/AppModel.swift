@@ -37,7 +37,8 @@ final class AppModel {
 
     var active: (any MusicSource)? { activeKind.map(source) }
 
-    /// Offline mode: nothing touches the internet.
+    /// Offline mode: lookups use only what was saved (Spotify itself still
+    /// approves the connection online).
     var isOfflineMode: Bool { activeKind == .offline }
 
     /// Whether lookups (genre, lyrics, rhythm) may use the internet.

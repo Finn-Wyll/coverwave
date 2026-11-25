@@ -430,7 +430,8 @@ mod tests {
         assert_eq!((s.added, s.updated, s.removed), (0, 0, 0));
 
         // Plays survive; deleted files disappear.
-        let b = root.join("A/One/02 b.wav");
+        // Built from parts, as the scan stores it (backslashes on Windows).
+        let b = root.join("A").join("One").join("02 b.wav");
         lib.record_play(&b, 1234).unwrap();
         let t = lib.track_by_path(&b).unwrap().unwrap();
         assert_eq!((t.play_count, t.last_played), (1, Some(1234)));

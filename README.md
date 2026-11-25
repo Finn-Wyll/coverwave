@@ -43,7 +43,7 @@ cargo install --git https://github.com/Finn-Wyll/coverwave cw-tui
 | Your music files | its own gapless player (FLAC, MP3, AAC, ALAC, Ogg, WAV) | a folder of music |
 | Spotify | the Web API, with a one-time browser login | a Spotify app client ID; Premium to control playback |
 | Apple Music | AppleScript on the Mac | macOS |
-| Spotify, offline | the Spotify app itself, playing your downloads | Spotify installed, prepared once while online |
+| Spotify downloads | the Spotify app itself, with saved covers and lyrics (no lookups) | Spotify on the same device; on iPhone, Spotify needs the internet to accept the connection |
 
 On the Mac, coverwave listens to Spotify or Music directly (with the screen and audio recording permission), so their covers react to the real sound. Where it cannot listen, the motion follows the song's rhythm, measured from its 30-second preview.
 
@@ -77,7 +77,7 @@ Settings save to `~/.config/coverwave/config.toml`, which is written with commen
 
 ## iPhone
 
-The iPhone app runs the same Rust core, wrapped in SwiftUI. It follows Spotify (on any device, with a device picker) or Apple Music, and you control playback with gestures on the cover. It has the same lyrics, a library and queue, and an Offline mode for Spotify downloads with no internet. It does not use the microphone. Setup is in [ios/README.md](ios/README.md).
+The iPhone app runs the same Rust core, wrapped in SwiftUI. It follows Spotify (on any device, with a device picker) or Apple Music, and you control playback with gestures on the cover. It has the same lyrics, a library and queue, and an Offline mode that follows the Spotify app directly while it plays your downloads, using only what coverwave saved ahead. It does not use the microphone. Setup is in [ios/README.md](ios/README.md).
 
 ## How it works
 

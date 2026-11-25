@@ -19,7 +19,7 @@ import UIKit
 ///
 /// Offline (Offline mode, or whenever the Web API cannot be reached) it
 /// follows the Spotify app on this iPhone directly instead
-/// (`SpotifyAppLink`), which plays downloaded songs with no internet; what
+/// (`SpotifyAppLink`), which plays its downloads; what
 /// the Web API would add (genre, cover) comes from `OfflineStore`.
 @MainActor
 @Observable
@@ -37,8 +37,6 @@ final class SpotifySource: MusicSource {
     /// The last token the Spotify app accepted (or gave, through
     /// `SpotifyAppLink.authorize`), with when: kept for connecting offline.
     static let appTokenKey = "spotify.app-token"
-    /// When the link to the Spotify app last connected while online.
-    static let preparedKey = "spotify.offline-prepared"
     /// How often the kept token is renewed quietly while online.
     private static let refreshAppTokenEvery: TimeInterval = 30 * 60
     /// After the Web API could not be reached, follow the app this long
@@ -86,12 +84,6 @@ final class SpotifySource: MusicSource {
     @ObservationIgnored private var webDownUntil: Date?
     /// The login lacks `app-remote-control` (made before offline existed).
     private(set) var needsOfflineLogin = false
-    /// When the Spotify app last accepted coverwave while online (nil:
-    /// never, so offline cannot connect yet).
-    private(set) var preparedAt: Date? = {
-        let t = UserDefaults.standard.double(forKey: "spotify.offline-prepared")
-        return t > 0 ? Date(timeIntervalSince1970: t) : nil
-    }()
     @ObservationIgnored private var lastQuietCheck: Date?
 
     /// Whether to follow the app rather than the Web API.
@@ -142,7 +134,11 @@ final class SpotifySource: MusicSource {
         followingApp = true
         let link = self.link ?? makeLink(clientID)
         status = .connecting
-        link.connect(token: appToken(), interactive: interactive)
+        // Authorizing goes through Spotify's servers, so it is only offered
+        // when they can be reached: not on Wi-Fi without internet (which
+        // iOS still reports as a network) or after the Web API failed.
+        let webAnswers = NetworkMonitor.shared.isOnline && webDownUntil == nil
+        link.connect(tokens: appTokens(), interactive: interactive && webAnswers)
     }
 
     private func makeLink(_ clientID: String) -> SpotifyAppLink {
@@ -157,12 +153,8 @@ final class SpotifySource: MusicSource {
             }
         }
         link.onConnectedWith = { [weak self] token in
-            // Keep what worked, for offline; online it also counts as prepared.
+            // Keep what worked, to reconnect quickly.
             Keychain.save("\(token) \(Int(Date().timeIntervalSince1970))", for: Self.appTokenKey)
-            if NetworkMonitor.shared.isOnline {
-                UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.preparedKey)
-                self?.preparedAt = .now
-            }
             if self?.followingApp == false { self?.link?.disconnect() }
         }
         link.onTrack = { [weak self] np in
@@ -176,6 +168,18 @@ final class SpotifySource: MusicSource {
     /// A token for the Spotify app: the Web API's (if it has not expired),
     /// else the last one the app gave, else the Web API's even if expired
     /// (the app may still accept it offline).
+    /// Every saved token, best first, without repeats: the player gets
+    /// each in turn until one is accepted.
+    private func appTokens() -> [String] {
+        let saved = Keychain.read(Self.accessKey)?.split(separator: " ").map(String.init).first
+        let fromApp = Keychain.read(Self.appTokenKey)?.split(separator: " ").map(String.init).first
+        var out: [String] = []
+        for t in [appToken(), fromApp, access?.token, saved].compactMap({ $0 }) where !out.contains(t) {
+            out.append(t)
+        }
+        return out
+    }
+
     private func appToken() -> String? {
         let saved = Keychain.read(Self.accessKey)?.split(separator: " ").map(String.init)
         let fromApp = Keychain.read(Self.appTokenKey)?.split(separator: " ").map(String.init)
@@ -198,14 +202,6 @@ final class SpotifySource: MusicSource {
     /// Spotify's return from authorizing in its app. False for other URLs.
     func handle(url: URL) -> Bool {
         link?.handle(url: url) ?? false
-    }
-
-    /// Authorises with the Spotify app while online (it opens Spotify and
-    /// comes back), so coverwave can connect to it offline later.
-    func prepareOffline() {
-        guard let clientID, NetworkMonitor.shared.isOnline else { return }
-        let link = self.link ?? makeLink(clientID)
-        link.authorize()
     }
 
     /// While online and following the Web API, connects to the Spotify app

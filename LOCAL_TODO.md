@@ -288,19 +288,11 @@ Nothing here has run on Windows yet.
       shows (the login now asks Spotify for `app-remote-control`).
 - [ ] iPhone, while online: leave coverwave open on Wi-Fi for a while and
       watch Settings > Offline > Saved count up. Check the size is sensible.
-- [ ] iPhone, online: Settings > Offline > **Prepare for Offline**. Spotify
-      opens, asks once, and comes back; the row should then say "Ready,
-      authorised just now". (Spotify's docs: App Remote must be authorised
-      online; coverwave keeps the token the Spotify app accepted and renews
-      it quietly every 30 minutes while Spotify is open and you are online.)
-- [ ] iPhone: turn on Airplane mode, open Spotify (play a downloaded song),
-      then open coverwave and pick **offline** on the start screen. Does it
-      connect, show the song, its cover and lyrics, and move with its rhythm?
-      If it says Spotify didn't answer, tap again: it should open Spotify to
-      authorize. This is the big unknown: Spotify does not say whether App
-      Remote works offline.
-- [ ] iPhone: in the Spotify mode, turn the internet off mid-song. coverwave
-      should switch to the Spotify app by itself, and back when it returns.
+- [x] iPhone, offline: following Spotify with no internet fails with
+      `wamp.error.authorization_failed`, even with a token minutes old
+      (2026-11-25). Spotify approves each connection online; kept anyway.
+- [ ] iPhone, online with Spotify playing a downloaded song: pick offline.
+      It should connect and show the saved cover, lyrics and rhythm.
 - [ ] iPhone offline: library panel opens saved liked songs and playlists;
       playing a playlist row starts at that song; search finds saved songs.
 - [ ] Spotify dashboard: App Remote needs the iOS bundle ID
@@ -312,9 +304,3 @@ Nothing here has run on Windows yet.
       the saved library and the cover should still work.
 - [ ] Mac: `,` > offline > spotify offline = always, then check nothing goes
       online; save ahead fills `~/.local/share/coverwave/offline/`.
-- [ ] iPhone: how long offline lasts. Prepare for Offline, turn on Airplane
-      mode, wait over an hour, then pick offline. Spotify's tokens nominally
-      last an hour; if the Spotify app refuses older ones offline, offline
-      would only last about an hour after the last renewal, and the docs
-      should say so.
-

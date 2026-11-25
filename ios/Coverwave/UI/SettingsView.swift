@@ -133,16 +133,6 @@ struct SettingsView: View {
             .onChange(of: settings.saveAhead) { _, scope in
                 if scope == .off { saver.stop() } else { saver.kick(force: true) }
             }
-            LabeledContent("Spotify App") {
-                Text(
-                    model.spotify.preparedAt.map {
-                        "Ready, authorised " + $0.formatted(.relative(presentation: .named))
-                    } ?? "Not prepared yet")
-            }
-            Button(model.spotify.preparedAt == nil ? "Prepare for Offline" : "Prepare Again") {
-                model.spotify.prepareOffline()
-            }
-            .disabled(!NetworkMonitor.shared.isOnline || !model.spotify.isConfigured)
             Toggle("Use Mobile Data", isOn: $settings.saveOnMobileData)
                 .onChange(of: settings.saveOnMobileData) { saver.kick() }
             LabeledContent("Saved") {
@@ -170,7 +160,7 @@ struct SettingsView: View {
             Text("Offline")
         } footer: {
             Text(
-                "Prepare for Offline once while online: it opens Spotify to authorise coverwave and comes back, and coverwave keeps that login (renewing it quietly whenever Spotify is open while you are online). Then pick Offline on the start screen (or in Sources) to listen with no internet: coverwave follows the Spotify app on this iPhone, which plays the songs you downloaded in Spotify, and uses what it saved here. Spotify must be open. While online, Save Ahead keeps each song's cover, genre, lyrics and rhythm, and your library's listings. If the internet drops while following Spotify, coverwave switches to the Spotify app by itself. The songs themselves stay in Spotify."
+                "Pick Offline on the start screen (or in Sources) to follow the Spotify app on this iPhone directly while it plays your downloads. coverwave then looks nothing up and uses only what it saved here, so it uses next to no data. Spotify must be open, and it needs the internet to accept the connection (Spotify's rule); after that the downloads play as usual. While online, Save Ahead keeps each song's cover, genre, lyrics and rhythm, and your library's listings. The songs themselves stay in Spotify."
             )
         }
         .onAppear { saver.refreshCounts() }

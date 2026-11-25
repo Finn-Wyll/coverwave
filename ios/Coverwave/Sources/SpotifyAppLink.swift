@@ -4,7 +4,10 @@ import UIKit
 /// A direct line to the Spotify app on this iPhone (Spotify's iOS SDK, App
 /// Remote), for when the Web API cannot be reached: it talks to the app on
 /// the phone itself, so it follows and controls songs Spotify plays from
-/// its downloads, with no internet.
+/// its downloads. Spotify approves each connection with its servers
+/// (`wamp.error.authorization_failed` offline, even with a token minutes
+/// old, tested 2026-11-25), so connecting needs the internet; playing the
+/// downloads afterwards does not.
 ///
 /// The Spotify app must be running. Connecting needs an access token with
 /// the `app-remote-control` scope: the Web API login's own (kept from the
@@ -23,7 +26,7 @@ final class SpotifyAppLink: NSObject {
 
     static let redirectURL = URL(string: "coverwave://spotify-callback")!
     static let notPrepared =
-        "Spotify needs coverwave authorised while online first: connect to the internet, then Settings > Offline > Prepare for Offline."
+        "Spotify only accepts a connection while it can reach its servers. Connect to the internet (Spotify can stay in its own offline mode), then tap offline again."
 
     /// Whether a connection is up or being made.
     var isBusy: Bool { remote.isConnected || state == .connecting }
@@ -68,6 +71,17 @@ final class SpotifyAppLink: NSObject {
 
     /// Connects with `token`. With `interactive`, a refused or missing
     /// token opens Spotify to authorize instead.
+    /// Tokens still to try in this attempt, after the current one.
+    private var spareTokens: [String] = []
+
+    /// Connects to the player with the first token that works, trying the
+    /// saved ones in order. No login happens: Spotify's kit needs a token
+    /// for every connection, so the saved ones are handed to the app.
+    func connect(tokens: [String], interactive: Bool) {
+        spareTokens = Array(tokens.dropFirst())
+        connect(token: tokens.first, interactive: interactive)
+    }
+
     func connect(token: String?, interactive: Bool) {
         if remote.isConnected { return state = .connected }
         // Authorizing goes through Spotify's servers: pointless offline.
@@ -87,7 +101,7 @@ final class SpotifyAppLink: NSObject {
             10,
             NetworkMonitor.shared.isOnline
                 ? "Spotify didn't answer. Open Spotify and play something, then tap offline again."
-                : "Spotify didn't answer. Open Spotify and play a downloaded song, then tap offline again. If it keeps failing, prepare offline again while online.")
+                : Self.notPrepared)
     }
 
     /// Opens the Spotify app, which asks to allow coverwave (once) and
@@ -201,12 +215,37 @@ final class SpotifyAppLink: NSObject {
         }
     }
 
+    /// Spotify's own reason, with what to do about it.
+    static func explain(_ error: Error?) -> String {
+        var reasons: [String] = []
+        var e = error as NSError?
+        while let current = e {
+            if !reasons.contains(current.localizedDescription) { reasons.append(current.localizedDescription) }
+            e = current.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        let reason = reasons.isEmpty ? "no reason given" : reasons.joined(separator: ": ")
+        let lower = reason.lowercased()
+        let aboutLogin = lower.contains("token") || lower.contains("auth") || lower.contains("unauthor")
+        if aboutLogin {
+            return NetworkMonitor.shared.isOnline
+                ? "Spotify's player turned down coverwave's token (\(reason)). Tap offline to authorise again."
+                : "Spotify's player needs the internet to accept coverwave (\(reason)). Connect to the internet, then tap offline again."
+        }
+        return "Couldn't reach Spotify's player (\(reason)). Open Spotify and play a song (offline: a downloaded one) so it stays awake, then tap again."
+    }
+
     fileprivate func received(_ np: NowPlaying, track: any SPTAppRemoteTrack) {
         currentTrack = track
         onTrack?(np)
     }
 
     fileprivate func connectionFailed(_ message: String) {
+        if !spareTokens.isEmpty {
+            let next = spareTokens.removeFirst()
+            remote.connectionParameters.accessToken = next
+            remote.connect()
+            return
+        }
         if authorizeOnFailure {
             authorize()
         } else {
@@ -232,10 +271,7 @@ extension SpotifyAppLink: SPTAppRemoteDelegate, SPTAppRemotePlayerStateDelegate 
     nonisolated func appRemote(_ appRemote: SPTAppRemote, didFailConnectionAttemptWithError error: Error?) {
         Task { @MainActor in
             self.watchdog?.cancel()
-            self.connectionFailed(
-                NetworkMonitor.shared.isOnline
-                    ? "Spotify refused the connection (\(error?.localizedDescription ?? "no reason given")). Tap to authorise again."
-                    : "Spotify refused the saved login offline. Open Spotify and play a downloaded song, then try again; if it still fails, prepare offline again while online.")
+            self.connectionFailed(Self.explain(error))
         }
     }
 
