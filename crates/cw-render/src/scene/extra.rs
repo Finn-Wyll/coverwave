@@ -670,17 +670,41 @@ pub(super) fn draw(
             color,
         } => {
             let mix = (0.18 * amp).min(0.3);
+            // Over lyrics the square is mostly blank: the rays light it
+            // with faint dust, so they read as rays and not as flashes on
+            // the letters.
+            let dust = scene.lyrics;
+            let dust_fg = scene.background.lerp(*color, (0.22 + 0.3 * amp).min(0.45));
             for y in art.y..art.y + art.h {
                 for x in art.x..art.x + art.w {
                     let i = y as usize * w + x as usize;
                     let cell = grid.cells()[i];
-                    if cell.ch == ' ' {
+                    if cell.ch == ' ' && !dust {
                         continue;
                     }
                     let a = (y as f32 - oy).atan2((x as f32 - ox) * ASPECT);
                     let v = frac(
                         a / std::f32::consts::PI * *rays as f32 * 2.0 + *cycles as f32 * phase,
                     );
+                    if cell.ch == ' ' {
+                        // The ray's core only, on a sparse pattern.
+                        if v < 0.16 && (x as usize * 7 + y as usize * 3).is_multiple_of(4) {
+                            let ch = if v < 0.08 { ':' } else { '.' };
+                            set(
+                                scene,
+                                grid,
+                                owner,
+                                i,
+                                Cell {
+                                    ch,
+                                    fg: dust_fg,
+                                    ..cell
+                                },
+                                id,
+                            );
+                        }
+                        continue;
+                    }
                     if v < 0.28 {
                         set(
                             scene,
@@ -760,9 +784,16 @@ pub(super) fn draw(
                     }
                     let t = ((x - art.x) as f32 * ASPECT + (y - art.y) as f32) / span;
                     // The band travels from (just outside) one corner across.
-                    let v = frac(t * (1.0 - *width) - *cycles as f32 * phase);
-                    if v < *width {
-                        let level = if (v / width - 0.5).abs() < 0.25 {
+                    // Over lyrics two bands share the diagonal, so the next
+                    // enters as the last leaves: the light never pauses.
+                    let (reps, band) = if scene.lyrics {
+                        (2.0, (*width * 2.0).min(0.5))
+                    } else {
+                        (1.0 - *width, *width)
+                    };
+                    let v = frac(t * reps - *cycles as f32 * phase);
+                    if v < band {
+                        let level = if (v / band - 0.5).abs() < 0.25 {
                             1.0
                         } else {
                             0.5

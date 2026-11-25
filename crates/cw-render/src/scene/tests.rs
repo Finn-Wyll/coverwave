@@ -820,3 +820,131 @@ fn lightning_strikes_some_beats_from_the_top() {
     }
     assert!((5..25).contains(&struck), "{struck} of 30 beats struck");
 }
+
+/// A lyrics-view scene: the cover's square cleared but for one line of
+/// letters, prepared as `lyrics::lyric_scene` does.
+fn lyric_scene_for(layers: Vec<Layer>) -> (Scene, Scene) {
+    let r = recipe(layers, 0.5, 7);
+    let (img, pal) = cover();
+    let params = ArtParams {
+        cell_aspect: 0.5,
+        style: ArtStyle::PaletteLed,
+        background: BG,
+        ramp: RAMP,
+    };
+    let cover_base = base_art(&img, &pal, 120, 50, params);
+    let art = art_rect(img.width, img.height, 120, 50, 0.5).unwrap();
+    let mut words = crate::lyrics::blank_square(&cover_base, art, BG);
+    let y = art.y + art.h / 2;
+    for x in art.x + 2..art.x + art.w - 2 {
+        words.set(
+            x,
+            y,
+            Cell {
+                ch: '#',
+                fg: Rgb(230, 230, 230),
+                bg: None,
+            },
+        );
+    }
+    let cover = prepare(&r, cover_base, art, RAMP);
+    (crate::lyrics::lyric_scene(&r, words, art, RAMP), cover)
+}
+
+#[test]
+fn light_sweep_over_lyrics_never_pauses_and_loops() {
+    let sweep = Layer::LightSweep {
+        intensity: 0.9,
+        cycles: 1,
+        width: 0.12,
+    };
+    let (lyr, _) = lyric_scene_for(vec![sweep]);
+    let (plain, _) = lyric_scene_for(Vec::new());
+    let audio = loud_no_beat();
+    let lit = |f: u32| {
+        let a = render(
+            &lyr,
+            Input {
+                frame: f,
+                audio: &audio,
+                fade: 1.0,
+            },
+        )
+        .grid;
+        let b = render(
+            &plain,
+            Input {
+                frame: f,
+                audio: &audio,
+                fade: 1.0,
+            },
+        )
+        .grid;
+        a.diff_count(&b)
+    };
+    // Every moment of the loop has light on the words: no gap between passes.
+    for f in (0..240).step_by(6) {
+        assert!(lit(f) > 0, "no light on the lyrics at frame {f}");
+    }
+    let at = |f| {
+        render(
+            &lyr,
+            Input {
+                frame: f,
+                audio: &audio,
+                fade: 1.0,
+            },
+        )
+        .grid
+    };
+    assert_eq!(at(0), at(240), "seamless loop");
+}
+
+#[test]
+fn sun_rays_light_the_blank_lyric_square_but_not_the_cover() {
+    let rays = Layer::SunRays {
+        intensity: 0.9,
+        rays: 5,
+        cycles: 1,
+    };
+    let (lyr, cover) = lyric_scene_for(vec![rays.clone()]);
+    let audio = loud_no_beat();
+    let art = lyr.art;
+    let dust = |s: &Scene, base_blank: &dyn Fn(u16, u16) -> bool| {
+        let g = render(
+            s,
+            Input {
+                frame: 40,
+                audio: &audio,
+                fade: 1.0,
+            },
+        )
+        .grid;
+        (art.y..art.y + art.h)
+            .flat_map(|y| (art.x..art.x + art.w).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                base_blank(x, y) && matches!(g.get(x, y).map(|c| c.ch), Some('.' | ':'))
+            })
+            .count()
+    };
+    let lyr_blank = |x, y| lyr.base.get(x, y).is_some_and(|c| c.ch == ' ');
+    assert!(
+        dust(&lyr, &lyr_blank) > 20,
+        "rays show across the empty square"
+    );
+    // Over the cover itself, blank cells stay blank as before.
+    let cover_blank = |x, y| cover.base.get(x, y).is_some_and(|c| c.ch == ' ');
+    assert_eq!(dust(&cover, &cover_blank), 0);
+    let at = |f| {
+        render(
+            &lyr,
+            Input {
+                frame: f,
+                audio: &audio,
+                fade: 1.0,
+            },
+        )
+        .grid
+    };
+    assert_eq!(at(0), at(240), "seamless loop");
+}

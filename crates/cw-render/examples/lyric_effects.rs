@@ -102,6 +102,14 @@ fn main() {
     }
 
     let (w, h) = (120u16, 50u16);
+    if std::env::args().any(|a| a == "--sweep") {
+        sweep(&img, &palette, params, &global);
+        return;
+    }
+    if std::env::args().any(|a| a == "--over-time") {
+        over_time(&img, &palette, params, &global);
+        return;
+    }
     let cover_base = base_art(&img, &palette, w, h, params);
     let art = art_rect(n, n, w, h, 0.5).expect("art");
     let words = cw_core::lyrics::parse_lrc(
@@ -178,5 +186,148 @@ fn main() {
             "NO"
         };
         println!("{kind:<16} {lp:>10.2} {sp:>10.2}   {verdict}");
+    }
+}
+
+/// With the lyrics held still, how much each kind keeps changing the letter
+/// cells from frame to frame (light that moves must keep moving on them),
+/// next to how much it changes the cover itself.
+fn over_time(img: &RgbImage, palette: &Palette, params: ArtParams, global: &Global) {
+    let (w, h) = (120u16, 50u16);
+    let n = img.width;
+    let cover_base = base_art(img, palette, w, h, params);
+    let art = art_rect(n, n, w, h, 0.5).expect("art");
+    let words = cw_core::lyrics::parse_lrc("[00:00.00]Sung right now in the square", "check")
+        .expect("lyrics");
+    let colors = LyricColors {
+        accent: Rgb(240, 160, 80),
+        text: Rgb(220, 220, 230),
+        background: BG,
+    };
+    let quiet = AudioFrame {
+        bands: [0.5; 6],
+        level: 0.5,
+        onset: 0.0,
+        onset_count: 0,
+    };
+    let base = lyric_base(
+        &cover_base,
+        art,
+        0.5,
+        &words,
+        1.0,
+        None,
+        LyricView::default(),
+        colors,
+        &quiet,
+    );
+    println!(
+        "{:<16} {:>14} {:>14}",
+        "kind", "letters/frame%", "cover/frame%"
+    );
+    for kind in LAYER_KINDS {
+        let r = recipe(vec![make_layer(kind, 1.0, global, 99)], global.clone());
+        let lyric_scene_ = lyric_scene(&r, base.clone(), art, RAMP);
+        let cover_scene = prepare(&r, cover_base.clone(), art, RAMP);
+        let (mut lc, mut ln, mut cc, mut cn) = (0u64, 0u64, 0u64, 0u64);
+        let mut prev: Option<(cw_core::CellGrid, cw_core::CellGrid)> = None;
+        for f in 0..120u32 {
+            let input = Input {
+                frame: f,
+                audio: &quiet,
+                fade: 1.0,
+            };
+            let l = render(&lyric_scene_, input).grid;
+            let input = Input {
+                frame: f,
+                audio: &quiet,
+                fade: 1.0,
+            };
+            let c = render(&cover_scene, input).grid;
+            if let Some((pl, pc)) = &prev {
+                for y in art.y..art.y + art.h {
+                    for x in art.x..art.x + art.w {
+                        if base.get(x, y).is_some_and(|c| c.ch != ' ') {
+                            ln += 1;
+                            lc += (l.get(x, y) != pl.get(x, y)) as u64;
+                        }
+                        cn += 1;
+                        cc += (c.get(x, y) != pc.get(x, y)) as u64;
+                    }
+                }
+            }
+            prev = Some((l, c));
+        }
+        let pct = |a: u64, b: u64| 100.0 * a as f64 / b.max(1) as f64;
+        println!("{kind:<16} {:>14.2} {:>14.2}", pct(lc, ln), pct(cc, cn));
+    }
+}
+
+/// Where the light sweep's band is on the lyrics as the song plays: its
+/// mean column, frame by frame (it must keep travelling).
+fn sweep(img: &RgbImage, palette: &Palette, params: ArtParams, global: &Global) {
+    let (w, h) = (120u16, 50u16);
+    let n = img.width;
+    let cover_base = base_art(img, palette, w, h, params);
+    let art = art_rect(n, n, w, h, 0.5).expect("art");
+    let words = cw_core::lyrics::parse_lrc(
+        "[00:00.00]Sung right now in the square\n[00:02.00]and the next line waits below\n[00:04.00]then another one",
+        "check",
+    )
+    .expect("lyrics");
+    let colors = LyricColors {
+        accent: Rgb(240, 160, 80),
+        text: Rgb(220, 220, 230),
+        background: BG,
+    };
+    let lit = recipe(
+        vec![make_layer("light_sweep", 1.0, global, 99)],
+        global.clone(),
+    );
+    let none = recipe(Vec::new(), global.clone());
+    for f in (0..240u32).step_by(10) {
+        let pos = f as f64 / 30.0;
+        let audio = AudioFrame {
+            bands: [0.6; 6],
+            level: 0.6,
+            onset: 0.0,
+            onset_count: 0,
+        };
+        let base = lyric_base(
+            &cover_base,
+            art,
+            0.5,
+            &words,
+            pos,
+            None,
+            LyricView::default(),
+            colors,
+            &audio,
+        );
+        let input = Input {
+            frame: f,
+            audio: &audio,
+            fade: 1.0,
+        };
+        let a = render(&lyric_scene(&lit, base.clone(), art, RAMP), input).grid;
+        let input = Input {
+            frame: f,
+            audio: &audio,
+            fade: 1.0,
+        };
+        let b = render(&lyric_scene(&none, base.clone(), art, RAMP), input).grid;
+        let (mut sx, mut n) = (0u64, 0u64);
+        for y in art.y..art.y + art.h {
+            for x in art.x..art.x + art.w {
+                if a.get(x, y) != b.get(x, y) {
+                    sx += x as u64;
+                    n += 1;
+                }
+            }
+        }
+        println!(
+            "frame {f:>3}: {n:>4} lit cells, mean column {:.1}",
+            sx as f64 / n.max(1) as f64
+        );
     }
 }

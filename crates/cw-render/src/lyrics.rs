@@ -206,7 +206,9 @@ pub fn lyric_scene(
 ) -> crate::Scene {
     let mut open = recipe.clone();
     open.subject_mask = cw_core::recipe::Mask::from_bits(0, 0, &[]);
-    crate::prepare(&open, base, art, ramp)
+    let mut scene = crate::prepare(&open, base, art, ramp);
+    scene.lyrics = true;
+    scene
 }
 
 /// `base` with the cover's square cleared to the page.

@@ -93,6 +93,9 @@ pub struct Scene {
     stage: f32,
     edges: Edges,
     palette: Vec<Rgb>,
+    /// Drawn over lyrics (`lyrics::lyric_scene`): the square is mostly
+    /// blank around the words, so moving light keeps travelling there.
+    pub(crate) lyrics: bool,
 }
 
 impl Scene {
@@ -427,6 +430,7 @@ pub fn prepare(recipe: &Recipe, base: CellGrid, art: Rect, ramp: &[char]) -> Sce
         stage: 0.6 + 0.6 * energy,
         edges,
         palette: palette.clone(),
+        lyrics: false,
     }
 }
 
