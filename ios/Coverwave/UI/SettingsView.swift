@@ -53,11 +53,24 @@ struct SettingsView: View {
                     Picker("Art", selection: $settings.artMode) {
                         ForEach(ArtMode.allCases) { Text($0.label).tag($0) }
                     }
-                    Picker("Detail", selection: $settings.artDetail) {
-                        ForEach(ArtDetail.allCases) { Text($0.label).tag($0) }
+                    VStack(alignment: .leading, spacing: 6) {
+                        LabeledContent("Detail", value: settings.artDetail.label)
+                        Slider(
+                            value: Binding(
+                                get: { Double(settings.artDetail.step) },
+                                set: { settings.artDetail = ArtDetail.allCases[Int($0.rounded())] }),
+                            in: 0...Double(ArtDetail.allCases.count - 1), step: 1
+                        ) {
+                            Text("Detail")
+                        } minimumValueLabel: {
+                            Text("Aa").font(.system(size: 15, design: .monospaced))
+                        } maximumValueLabel: {
+                            Text("Aa").font(.system(size: 8, design: .monospaced))
+                        }
+                        .accessibilityValue(settings.artDetail.label)
                     }
                 } footer: {
-                    Text("Finer detail draws the cover with smaller, more numerous characters. Automatic motion pauses when Reduce Motion is on.")
+                    Text("Finer detail draws the cover with smaller, more numerous characters: from 64 across the screen up to 224, where they read as texture. The finest levels use a little more battery. Automatic motion pauses when Reduce Motion is on.")
                 }
 
                 Section {

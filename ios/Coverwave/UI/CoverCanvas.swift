@@ -13,10 +13,15 @@ enum Theme {
 
 /// How many characters the art is made of (see `CellMetrics`). Finer
 /// detail means smaller glyphs: the cover reads more like the picture.
+/// How many characters the art is made of, coarse to fine (a slider in
+/// Settings). Saved by raw value, so the first three keep their old names.
 enum ArtDetail: String, CaseIterable, Identifiable {
     case standard
     case fine
     case finest
+    case extraFine
+    case ultraFine
+    case maximum
 
     var id: String { rawValue }
 
@@ -25,6 +30,9 @@ enum ArtDetail: String, CaseIterable, Identifiable {
         case .standard: "Standard"
         case .fine: "Fine"
         case .finest: "Finest"
+        case .extraFine: "Extra Fine"
+        case .ultraFine: "Ultra Fine"
+        case .maximum: "Maximum"
         }
     }
 
@@ -34,12 +42,18 @@ enum ArtDetail: String, CaseIterable, Identifiable {
         case .standard: 64
         case .fine: 96
         case .finest: 128
+        case .extraFine: 160
+        case .ultraFine: 192
+        case .maximum: 224
         }
     }
+
+    /// Its place on the slider (0 coarsest).
+    var step: Int { Self.allCases.firstIndex(of: self) ?? 0 }
 }
 
-/// The character grid that fits a canvas, in SF Mono: 64, 96 or 128
-/// columns on a phone (by `ArtDetail`), 1.5 times that on an iPad.
+/// The character grid that fits a canvas, in SF Mono: 64 to 224 columns on
+/// a phone (by `ArtDetail`), 1.5 times that on an iPad.
 struct CellMetrics: Equatable {
     let fontSize: CGFloat
     let cellWidth: CGFloat
@@ -58,8 +72,9 @@ struct CellMetrics: Equatable {
 
     init(size: CGSize, detail: ArtDetail = .fine) {
         let targetCols = detail.phoneColumns * (size.width < 500 ? 1 : 1.5)
-        // 4pt is still 12 pixels tall on a 3x screen.
-        let fs = min(16, max(4, size.width / targetCols / Self.advancePerPoint))
+        // 2.5pt is still 9 pixels tall on a 3x screen: at the finest levels
+        // the characters read as texture, like pixels.
+        let fs = min(16, max(2.5, size.width / targetCols / Self.advancePerPoint))
         fontSize = fs
         cellWidth = fs * Self.advancePerPoint
         cellHeight = fs * 1.2
