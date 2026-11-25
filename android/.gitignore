@@ -1,0 +1,11 @@
+# Made by build-core.sh: the Rust core and its Kotlin bindings.
+/app/src/main/jniLibs/
+/app/src/main/java/uniffi/
+# Made by the beat-model export (ios/tools/export_beat_model.py).
+/app/src/main/assets/BeatThis-small.onnx
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+.kotlin/

@@ -22,6 +22,7 @@ M0 (workspace + TUI shell), M1 (local playback), M2 (static ASCII album art), M3
 - Disk: `target/` only grows (Cargo keeps every old build). Debug builds carry line tables only (`[profile.dev]` in Cargo.toml). `cargo clean` frees it all.
 - Beat tracker check against PyTorch, or rhythm maps of real clips: `cargo run -p cw-analysis --release --example beat_check -- <BeatThis-small.onnx> <reference dir> | --wav <clip.wav>...`
 - Tempo of a remote track: `cargo run -p cw-sources --release --example tempo_lookup -- "ARTIST" "TITLE"`; of a file: `cargo run -p cw-audio --release --example tempo -- <file>`.
+- Android: `android/build-core.sh` (needs the NDK; `ANDROID_HOME` set), then `cd android && ./gradlew :app:assembleRelease`. `./gradlew :app:testReleaseUnitTest` checks the Kotlin bindings against a host build of the core (`cargo build -p cw-ffi --release`). There is no emulator in the cloud (no KVM), so UI checks go to the owner (LOCAL_TODO.md).
 - Decode check without playing: `cargo run -p cw-audio --release --example probe -- <files or folders>`
 - Analysis trace without playing: `cargo run -p cw-audio --release --example analyse -- <file>` (bands, level and onsets at 30fps as text)
 - Recipe for one image: `cargo run -p cw-analysis --release --example recipe -- <vision_model.onnx> <image> [assets/pca.bin]`

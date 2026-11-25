@@ -6,6 +6,8 @@
 #     and its Swift bindings (ios/build-core.sh). ios/fetch-core.sh
 #     downloads them; Xcode then only compiles the Swift app and signs it.
 #   - BeatThis-small.onnx: the beat tracker (ios/tools/export_beat_model.py).
+#   - coverwave-android.apk: the Android app (android/), with the Rust core
+#     and the beat tracker inside, signed with the committed debug key.
 #   - the coverwave terminal app for macOS (Apple silicon), Linux and Windows.
 #   - build-info.txt: the commit they were built from.
 #
@@ -94,6 +96,53 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
+  android:
+    if: github.event_name == 'workflow_dispatch' || !github.event.repository.private
+    needs: [beat-model]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android-core
+      - name: Android NDK
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.2.12479018" > /dev/null
+      - uses: actions/download-artifact@v4
+        with:
+          name: beat-model
+          path: android/app/src/main/assets
+      - name: Build the core
+        run: android/build-core.sh
+      - name: Build the APK
+        working-directory: android
+        env:
+          # The public client ID of the owner's Spotify app (Settings >
+          # Secrets and variables > Actions > Variables). Optional: without
+          # it the app asks for one in Settings.
+          SPOTIFY_CLIENT_ID: ${{ vars.SPOTIFY_CLIENT_ID }}
+          COVERWAVE_VERSION_CODE: ${{ github.run_number }}
+          COVERWAVE_VERSION_NAME: ${{ github.ref_type == 'tag' && github.ref_name || format('0.1.{0}', github.run_number) }}
+        run: ./gradlew --no-daemon :app:assembleRelease
+      - name: Package
+        run: |
+          mkdir -p out
+          cp android/app/build/outputs/apk/release/app-release.apk out/coverwave-android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: out/*
+          if-no-files-found: error
+          retention-days: 3
+
   tui:
     if: github.event_name == 'workflow_dispatch' || !github.event.repository.private
     strategy:
@@ -142,7 +191,7 @@ jobs:
           retention-days: 3
 
   publish:
-    needs: [ios-core, beat-model, tui]
+    needs: [ios-core, beat-model, android, tui]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -184,6 +233,14 @@ jobs:
             echo
             echo "macOS marks downloads as quarantined; if it refuses to open, run \`xattr -d com.apple.quarantine coverwave\` once. The first run downloads the cover-analysis model (45 MB)."
             echo
+            echo "### Android"
+            echo
+            echo "| File | Size |"
+            echo "|---|---|"
+            echo "| [coverwave-android.apk]($base/coverwave-android.apk) | $(size coverwave-android.apk) |"
+            echo
+            echo "Open it on the phone and allow installing from your browser or files app. Android 8 or newer. It is signed with a debug key kept in the repo, so each new build installs over the last."
+            echo
             echo "### For building the iPhone app"
             echo
             echo "\`ios/fetch-core.sh\` downloads these, so Xcode only compiles the Swift app:"
@@ -214,6 +271,7 @@ jobs:
             "dist/coverwave-macos-arm64.tar.gz#coverwave for macOS (Apple silicon)"
             "dist/coverwave-linux-x64.tar.gz#coverwave for Linux (x86-64)"
             "dist/coverwave-windows-x64.zip#coverwave for Windows (x86-64)"
+            "dist/coverwave-android.apk#coverwave for Android (APK)"
             "dist/CoverwaveCore.xcframework.zip#iOS core (XCFramework)"
             "dist/CoverwaveCore.swift#iOS core Swift bindings"
             "dist/BeatThis-small.onnx#Beat tracker model (ONNX)"

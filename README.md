@@ -2,7 +2,7 @@
 
 <p align="center">
   A music player that draws the album cover in text and lets it move with the song.<br>
-  In your terminal, and on your iPhone.
+  In your terminal, on your iPhone, and on Android.
 </p>
 
 <p align="center">
@@ -15,6 +15,8 @@
   <a href="#build-from-source">Build from source</a>
   &nbsp;&nbsp;
   <a href="ios/README.md">iPhone app</a>
+  &nbsp;&nbsp;
+  <a href="android/README.md">Android app</a>
 </p>
 
 Each cover gets its own motion. coverwave reads the picture (rain, neon, night sky, ocean...) and the song's genre, then picks a few of 31 animation layers to run over the art, timed to the music. The same cover always moves the same way, on every machine.
@@ -79,6 +81,10 @@ Settings save to `~/.config/coverwave/config.toml`, which is written with commen
 
 The iPhone app runs the same Rust core, wrapped in SwiftUI. It follows Spotify (on any device, with a device picker) or Apple Music, and you control playback with gestures on the cover. It has the same lyrics, a library and queue, and an Offline mode that follows the Spotify app directly while it plays your downloads, using only what coverwave saved ahead. It does not use the microphone. Setup is in [ios/README.md](ios/README.md).
 
+## Android
+
+The Android app mirrors the iPhone app on the same Rust core, in Jetpack Compose: the same gestures, lyrics, library, queue and Offline mode. It follows Spotify, or Apple Music (and any other player) through Android's media controls. Download `coverwave-android.apk` from the [latest build](https://github.com/Finn-Wyll/coverwave/releases/tag/latest-build) and open it on the phone. Details in [android/README.md](android/README.md).
+
 ## How it works
 
 1. **Read the cover.** A small image model (MobileCLIP) scores the cover against scenes like rain, fire, space and city lights. Its palette gives one accent colour.
@@ -109,16 +115,17 @@ cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && carg
 | `crates/cw-library` | the music library, search, playlists |
 | `crates/cw-capture` | listening to other apps (macOS process tap) |
 | `crates/cw-sources` | Spotify, Apple Music, offline copies |
-| `crates/cw-ffi` | the core for iOS (UniFFI) |
+| `crates/cw-ffi` | the core for iOS and Android (UniFFI) |
 | `frontends/cw-tui` | the terminal app |
 | `ios` | the iPhone app |
+| `android` | the Android app |
 
 Every push to `main` builds the apps on GitHub and refreshes the [latest build](https://github.com/Finn-Wyll/coverwave/releases/tag/latest-build); version tags (`v0.2.0`) get a release of their own.
 
 ## Credits
 
 - [MobileCLIP](https://github.com/apple/ml-mobileclip) by Apple reads the covers. Its weights are for research and personal use, so coverwave downloads them on first run and never ships them.
-- [Beat This!](https://github.com/CPJKU/beat_this) (MIT) measures each song's rhythm on the iPhone.
+- [Beat This!](https://github.com/CPJKU/beat_this) (MIT) measures each song's rhythm on the phone.
 - [Space Mono](https://github.com/googlefonts/spacemono) (SIL Open Font License) draws the big lyric letters.
 - [LRCLIB](https://lrclib.net) provides lyrics, and [Deezer's API](https://developers.deezer.com) provides previews, tempos and genres. Neither needs a key.
 - The cover in the animations above is an original image made for this page (`docs/media/demo-cover.jpg`), rendered by `cargo run -p cw-render --release --example readme_media`.

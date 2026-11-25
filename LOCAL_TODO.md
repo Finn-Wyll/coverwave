@@ -304,3 +304,29 @@ Nothing here has run on Windows yet.
       the saved library and the cover should still work.
 - [ ] Mac: `,` > offline > spotify offline = always, then check nothing goes
       online; save ahead fills `~/.local/share/coverwave/offline/`.
+
+## Android app (2026-11-25)
+
+Built and compiled in the cloud, with the Kotlin bindings tested against
+the core, but **never run on a phone** (no emulator there). Expect to fix
+things on the first run.
+
+- [ ] Install `coverwave-android.apk` from the latest build. It opens on the
+      connect screen; the cover-analysis model downloads (top-left status).
+- [ ] Spotify: add the client ID (repository variable `SPOTIFY_CLIENT_ID`,
+      or paste it in Settings), and in the Spotify dashboard add the redirect
+      URI `coverwave://spotify-callback` and the Android package
+      `app.coverwave` with SHA-1
+      `1F:C1:54:69:E7:2A:EB:2D:2A:42:44:F8:C3:AD:0E:28:49:38:74:32`.
+      Then log in, play something, and check the cover moves to the beat.
+- [ ] Apple Music: tap it, allow Notification access for coverwave, go back.
+      The song, cover and controls should follow Apple Music. Also try
+      another player (YouTube Music...): it should be picked up when Apple
+      Music is not playing.
+- [ ] Gestures: tap, hold + slide to scrub, swipes (next/previous, library
+      up, queue down), two-finger tap (settings), two-finger swipe (lyrics).
+      The panels should follow the finger and be thrown by a flick.
+- [ ] Offline: with Spotify downloads, pick Offline. Spotify asks once to
+      allow coverwave (needs the internet that first time).
+- [ ] Smoothness: the art at Fine and Finest detail, in True colour, should
+      hold 30fps. If it stutters, say which setting.
