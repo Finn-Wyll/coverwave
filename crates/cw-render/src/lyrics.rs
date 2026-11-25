@@ -28,9 +28,9 @@ use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LyricStyle {
-    #[default]
     BigCurrent,
     Text,
+    #[default]
     BigOnly,
 }
 
@@ -444,6 +444,9 @@ impl Row {
                         let c = ink[ry as usize * *cols as usize + rx as usize];
                         let Some(ch) = shade(c, rx, ry) else { continue };
                         let x = x0 + rx;
+                        // A window: the cover's own character shows through
+                        // the letter (its shape still from the ink).
+                        let ch = painter.window_char(x, yy as u16).unwrap_or(ch);
                         if let Some(under) = grid.get(x, yy as u16).copied() {
                             // Faint edges lean toward the page.
                             let fg = painter.color(x, yy as u16, tone, (0.45 + 0.55 * c).min(1.0));
@@ -482,19 +485,30 @@ struct Painter<'a> {
 }
 
 impl Painter<'_> {
+    /// With cover paint, the cover's character at (x, y), if it draws
+    /// anything there (blank cells keep the letter's own shading).
+    fn window_char(&self, x: u16, y: u16) -> Option<char> {
+        if self.paint != LyricPaint::Cover {
+            return None;
+        }
+        let c = self.cover?.frame.get(x, y)?.ch;
+        (!c.is_whitespace() && c != WIDE_CONTINUATION).then_some(c)
+    }
+
     /// The colour of the lyric cell at (x, y); `ink` < 1 fades a letter's
     /// edges toward the page.
     fn color(&self, x: u16, y: u16, tone: Tone, ink: f32) -> Rgb {
         let cell_color = |g: &CellGrid| g.get(x, y).map(|c| c.bg.unwrap_or(c.fg));
         let lifted = |c: Rgb| c.lerp(Rgb(255, 255, 255), tone.lift);
         let base = match (self.paint, self.cover) {
-            // A window onto the moving cover: its colour here, lifted when
-            // too dark to read. The cover's own motion lights it.
+            // A window onto the moving cover: its colour here. Where the
+            // cover is too dark to read (black covers), the line's own
+            // colour fills in, wholly on black. The cover's motion lights it.
             (LyricPaint::Cover, Some(cover)) => {
                 let c = cell_color(cover.frame).unwrap_or(tone.color);
                 let lum = luminance(c);
                 let c = if lum < 110.0 {
-                    c.lerp(Rgb(255, 255, 255), 0.45 * (1.0 - lum / 110.0))
+                    c.lerp(tone.color, 1.0 - lum / 110.0)
                 } else {
                     c
                 };
@@ -959,10 +973,11 @@ mod tests {
         let mut frame = CellGrid::new(60, 40);
         for y in 0..40 {
             for x in 0..60 {
+                // Bright enough that window paint shows them as they are.
                 let c = if x < 30 {
-                    Rgb(180, 40, 40)
+                    Rgb(255, 120, 120)
                 } else {
-                    Rgb(40, 40, 180)
+                    Rgb(120, 120, 255)
                 };
                 base.set(
                     x,
@@ -974,7 +989,7 @@ mod tests {
                     },
                 );
                 let lit = if y < 20 {
-                    Rgb(c.0.saturating_mul(2).max(c.0), c.1, c.2)
+                    c.lerp(Rgb(255, 255, 255), 0.5)
                 } else {
                     c
                 };
@@ -982,7 +997,7 @@ mod tests {
                     x,
                     y,
                     Cell {
-                        ch: '#',
+                        ch: if x < 30 { 'L' } else { 'R' },
                         fg: lit,
                         bg: None,
                     },
@@ -1029,6 +1044,20 @@ mod tests {
             .collect();
         assert!(!left.is_empty() && !right.is_empty());
         assert!(left.iter().all(|c| c.0 > c.2) && right.iter().all(|c| c.2 > c.0));
+        // The letters are made of the cover's own characters.
+        let chars = |xs: std::ops::Range<u16>| -> Vec<char> {
+            (0..40)
+                .flat_map(|y| xs.clone().map(move |x| (x, y)))
+                .map(|(x, y)| g.get(x, y).unwrap().ch)
+                .filter(|c| *c != '.')
+                .collect()
+        };
+        assert!(
+            chars(10..30).iter().all(|c| *c == 'L'),
+            "{:?}",
+            chars(10..30)
+        );
+        assert!(chars(30..50).iter().all(|c| *c == 'R'));
 
         // Accent paint: the same letters, lit where the cover is lit.
         let still = CoverLight {
@@ -1058,8 +1087,9 @@ mod tests {
         let x = (10..50)
             .find(|&x| dark.get(x, y).unwrap().ch != '.')
             .unwrap();
+        let sum = |c: Rgb| c.0 as u32 + c.1 as u32 + c.2 as u32;
         assert!(
-            lit.get(x, y).unwrap().fg.0 > dark.get(x, y).unwrap().fg.0,
+            sum(lit.get(x, y).unwrap().fg) > sum(dark.get(x, y).unwrap().fg),
             "brighter where lit"
         );
     }
@@ -1162,5 +1192,48 @@ mod tests {
         );
         assert_eq!(accent_rows(&g).len(), 1);
         assert_eq!(wrap("a bb ccc dddd", 6), ["a bb", "ccc", "dddd"]);
+    }
+
+    #[test]
+    fn window_paint_on_a_black_cover_fills_with_the_line_colour() {
+        let mut black = CellGrid::new(60, 40);
+        for y in 0..40 {
+            for x in 0..60 {
+                black.set(
+                    x,
+                    y,
+                    Cell {
+                        ch: ' ',
+                        fg: Rgb(0, 0, 0),
+                        bg: None,
+                    },
+                );
+            }
+        }
+        let still = CoverLight {
+            base: &black,
+            frame: &black,
+        };
+        let mut v = view(LyricStyle::BigOnly, LyricScroll::Up, LyricSize::Large);
+        v.paint = LyricPaint::Cover;
+        let mut g = cover();
+        overlay(
+            &mut g,
+            ART,
+            0.5,
+            &song(),
+            6.0,
+            None,
+            v,
+            COLORS,
+            &AudioFrame::default(),
+            Some(still),
+        );
+        // The sung line's colour (the accent) at full ink, not black.
+        let bright = (0..40)
+            .flat_map(|y| (0..60).map(move |x| (x, y)))
+            .filter_map(|(x, y)| g.get(x, y).filter(|c| c.ch != '.').map(|c| c.fg))
+            .any(|c| c == COLORS.accent);
+        assert!(bright, "letters on black take the line colour");
     }
 }

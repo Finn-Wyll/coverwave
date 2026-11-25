@@ -1007,9 +1007,9 @@ impl App {
             }
             Item::LyricStyle => {
                 let all = [
+                    LyricStyle::BigOnly,
                     LyricStyle::BigCurrent,
                     LyricStyle::Text,
-                    LyricStyle::BigOnly,
                 ];
                 self.lyric_view.style = step(&all, self.lyric_view.style, dir);
                 let name = match self.lyric_view.style {
@@ -1408,13 +1408,13 @@ mod tests {
         app.config_path = Some(path.clone());
         app.on_key(press(KeyCode::Char(',')));
         assert!(app.settings_menu.open);
-        // Show lyrics, then style: right twice -> big only.
+        // Show lyrics, then style: right twice from big only -> text.
         app.on_key(press(KeyCode::Enter));
         assert!(app.show_lyrics);
         app.on_key(press(KeyCode::Down));
         app.on_key(press(KeyCode::Right));
         app.on_key(press(KeyCode::Right));
-        assert_eq!(app.lyric_view.style, cw_render::lyrics::LyricStyle::BigOnly);
+        assert_eq!(app.lyric_view.style, cw_render::lyrics::LyricStyle::Text);
         // Motion: down to the art section's second row.
         while app.settings_menu.selected() != crate::settings_menu::Item::Motion {
             app.on_key(press(KeyCode::Down));
@@ -1426,7 +1426,7 @@ mod tests {
         app.on_key(press(KeyCode::Left));
         assert!(!app.motion);
         let (c, _) = crate::config::Config::load(&path);
-        assert_eq!(c.lyrics.style, "big_only");
+        assert_eq!(c.lyrics.style, "text");
         assert!(!c.motion);
         // Playback keys do not leak through while the menu is open; esc closes.
         app.on_key(press(KeyCode::Char('q')));

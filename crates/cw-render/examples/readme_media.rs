@@ -2,7 +2,8 @@
 //! (analysis, recipe, renderer) at a steady beat, drawn as a terminal would
 //! with the bundled Space Mono, saved as looping GIFs.
 //!
-//! `cargo run -p cw-render --release --example readme_media -- VISION_ONNX COVER OUT_DIR`
+//! `cargo run -p cw-render --release --example readme_media -- VISION_ONNX COVER OUT_DIR [cover]`
+//! (`cover`: lyrics in the cover's own characters and colours)
 
 use cw_analysis::{ClipModel, GenreFamily, Models, Pca, ScenePrompts};
 use cw_core::{CellGrid, Rgb};
@@ -195,6 +196,10 @@ fn main() {
         text: Rgb(222, 226, 232),
         background: BG,
     };
+    let mut view = LyricView::default();
+    if args.get(3).is_some_and(|a| a == "cover") {
+        view.paint = cw_render::lyrics::LyricPaint::Cover;
+    }
     let frames = (0..FRAMES)
         .map(|i| {
             let f = i * STEP;
@@ -207,7 +212,7 @@ fn main() {
                 &words,
                 pos,
                 Some(8.0),
-                LyricView::default(),
+                view,
                 colors,
                 &audio,
             );

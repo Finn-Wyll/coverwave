@@ -101,7 +101,7 @@ final class AppSettings {
         gestures = GestureScheme(rawValue: defaults.string(forKey: "gestures") ?? "") ?? .direct
         showLyrics = defaults.bool(forKey: "showLyrics")
         let savedStyle = defaults.string(forKey: "lyricStyle")
-        lyricStyle = LyricStyleKind.allCases.first { $0.key == savedStyle } ?? .bigCurrent
+        lyricStyle = LyricStyleKind.allCases.first { $0.key == savedStyle } ?? .bigOnly
         let savedScroll = defaults.string(forKey: "lyricScroll")
         lyricScroll = LyricScrollKind.allCases.first { $0.key == savedScroll } ?? .up
         lyricPaint = defaults.string(forKey: "lyricPaint") == "cover" ? .cover : .accent
@@ -143,7 +143,7 @@ extension ArtMode: CaseIterable, Identifiable {
 }
 
 extension LyricStyleKind: CaseIterable, Identifiable {
-    public static var allCases: [LyricStyleKind] { [.bigCurrent, .text, .bigOnly] }
+    public static var allCases: [LyricStyleKind] { [.bigOnly, .bigCurrent, .text] }
     public var id: String { key }
 
     var key: String {

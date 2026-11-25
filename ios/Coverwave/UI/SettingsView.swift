@@ -123,6 +123,19 @@ struct SettingsView: View {
         .tint(model.accent)
     }
 
+    /// Why Save Now cannot run, if it cannot.
+    private var saveNowBlocked: String? {
+        if model.settings.saveAhead == .off { return "Turn on Save Ahead first." }
+        if model.saver.activity != nil { return "Saving now." }
+        if model.isOfflineMode { return "Saving needs the Spotify source: switch from Offline to Spotify in Sources." }
+        if !NetworkMonitor.shared.isOnline { return "Saving needs the internet." }
+        if NetworkMonitor.shared.isExpensive && !model.settings.saveOnMobileData {
+            return "On mobile data: turn on Use Mobile Data, or join Wi-Fi."
+        }
+        if model.spotify.status != .connected { return "Connect Spotify first." }
+        return nil
+    }
+
     @ViewBuilder private var offlineSection: some View {
         @Bindable var settings = model.settings
         let saver = model.saver
@@ -144,7 +157,10 @@ struct SettingsView: View {
                 Text(activity).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
             }
             Button("Save Now") { saver.kick(force: true) }
-                .disabled(settings.saveAhead == .off || saver.activity != nil || model.isOfflineMode)
+                .disabled(saveNowBlocked != nil)
+            if let why = saveNowBlocked {
+                Text(why).font(.footnote).foregroundStyle(.secondary)
+            }
             if model.spotify.needsOfflineLogin {
                 Button("Log In Again for Offline") { model.spotify.reauthorize() }
             }

@@ -93,7 +93,8 @@ impl Default for Capture {
 pub struct Lyrics {
     /// Look lyrics up on LRCLIB (sends artist, title, album, length).
     pub online_lookup: bool,
-    /// "big" (sung line in big letters) | "text" | "big_only"
+    /// "big_only" (only the sung line, big; default) | "big" (sung line
+    /// big, the others as text) | "text"
     pub style: String,
     /// "up" (new lines rise, like Spotify) | "down"
     pub scroll: String,
@@ -107,7 +108,7 @@ impl Default for Lyrics {
     fn default() -> Self {
         Lyrics {
             online_lookup: true,
-            style: "big".into(),
+            style: "big_only".into(),
             scroll: "up".into(),
             size: "medium".into(),
             colors: "accent".into(),
@@ -202,7 +203,7 @@ enabled = true
 [lyrics]
 # l shows lyrics instead of the cover (the cover keeps moving behind).
 online_lookup = true    # look lyrics up on LRCLIB (sends artist, title, album)
-style = "big"           # big (sung line in big letters) | text | big_only
+style = "big_only"      # big_only (sung line, big) | big (+ others as text) | text
 scroll = "up"           # up (new lines rise, like Spotify) | down
 size = "medium"         # big letters: small | medium | large
 colors = "accent"       # accent | cover (letters as windows onto the cover)
