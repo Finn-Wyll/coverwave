@@ -20,9 +20,12 @@ fi
 
 device="${1:-}"
 if [ -z "$device" ]; then
-  # The first connected physical device.
-  device="$(xcrun devicectl list devices 2>/dev/null \
-    | awk '/connected/ && /physical/ { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9A-F]{8}-[0-9A-F]{16}$|^[0-9A-F-]{25,}$/) { print $i; exit } }')"
+  # The first iPhone or iPad plugged in, else one paired and reachable
+  # over Wi-Fi ("available (paired)"). Watches are skipped.
+  udid='{ for (i = 1; i <= NF; i++) if ($i ~ /^[0-9A-F]{8}-[0-9A-F]{16}$|^[0-9A-F-]{25,}$/) { print $i; exit } }'
+  devices="$(xcrun devicectl list devices 2>/dev/null | grep -E 'iPhone|iPad' | grep physical || true)"
+  device="$(echo "$devices" | grep connected | awk "$udid" | head -1)"
+  [ -n "$device" ] || device="$(echo "$devices" | grep 'available' | awk "$udid" | head -1)"
 fi
 if [ -z "$device" ]; then
   echo "No connected iPhone found. Plug it in, unlock it, and trust this Mac." >&2
